@@ -1,0 +1,1248 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AI 生圖與排版系統</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&family=Noto+Serif+TC:wght@400;700;900&family=LXGW+WenKai+TC:wght@400;700&family=Huninn&family=Montserrat:wght@400;800&family=Playfair+Display:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/fabric@5.3.0/dist/fabric.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  :root { --bg:#0f1117; --card:#1a1d27; --line:#2c3040; --text:#e8eaf0; --muted:#9aa0b4; --accent:#5865f2; --accent2:#00a8fc; --btn:#242838; --btnh:#33384d; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; user-select:none; background:var(--bg); color:var(--text); font-family:"Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif; overflow:hidden; }
+  header { display:flex; align-items:center; gap:10px; padding:0 14px; border-bottom:1px solid var(--line); height:50px; background:var(--card); z-index:20; }
+  header h1 { margin:0; font-size:16px; color:var(--text); white-space:nowrap; }
+  .tabs { display:flex; gap:4px; }
+  .tab { background:transparent; color:var(--muted); padding:6px 12px; font-size:13px; border-radius:6px; }
+  .tab.active { background:var(--accent); color:#fff; font-weight:bold; }
+  .cloud-bar { margin-left:auto; display:flex; align-items:center; gap:5px; }
+  .cloud-bar input { width:95px; padding:5px 7px; font-size:12px; background:#11131b; color:var(--text); border:1px solid var(--line); border-radius:6px; }
+  .cloud-bar button { padding:5px 9px; font-size:12px; white-space:nowrap; }
+  button { cursor:pointer; border:none; border-radius:6px; font-family:inherit; color:var(--text); background:var(--btn); transition:background .15s; }
+  button:hover { background:var(--btnh); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  textarea, select, input[type=number], input[type=text] { width:100%; background:#11131b; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font-size:13px; font-family:inherit; user-select:text; }
+  textarea { min-height:70px; resize:vertical; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .check { display:flex; align-items:center; gap:7px; margin-top:7px; font-size:12px; color:var(--text); cursor:pointer; }
+  .primary { width:100%; margin-top:12px; padding:11px; font-size:15px; font-weight:bold; color:#fff; background:var(--accent); }
+  .primary:hover { background:#4752c4; }
+  .act-btn { background:#2b3252; color:#fff; font-weight:bold; }
+  .act-btn:hover { background:#3a4470; }
+  .chips { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; }
+  .chip { padding:4px 9px; font-size:11px; border-radius:99px; }
+  .status { margin-top:8px; font-size:12px; color:var(--muted); min-height:18px; word-break:break-word; }
+  .hidden { display:none !important; }
+
+  /* ---------- 生圖頁 ---------- */
+  #tab-gen { height:calc(100vh - 50px); overflow-y:auto; }
+  #tab-gen main { max-width:1240px; margin:0 auto; padding:14px; display:grid; grid-template-columns:370px 1fr; gap:16px; }
+  .drop { border:2px dashed var(--line); border-radius:8px; padding:12px; text-align:center; color:var(--muted); font-size:12px; cursor:pointer; }
+  .refbox { display:flex; gap:10px; align-items:flex-start; margin-top:8px; }
+  .refbox img { width:76px; height:76px; object-fit:cover; border-radius:6px; border:1px solid var(--line); }
+  .refbox .refinfo { flex:1; font-size:12px; color:var(--muted); }
+  .progress { height:5px; background:#11131b; border-radius:99px; overflow:hidden; margin-top:6px; }
+  .progress div { height:100%; width:0; background:var(--accent2); transition:width .2s; }
+  .sub-box { background:#11131b; border:1px solid var(--line); border-radius:8px; padding:10px; margin-top:8px; }
+  details.fav-drawer { background:#11131b; border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-top:8px; }
+  details.fav-drawer summary { cursor:pointer; font-size:12px; font-weight:bold; color:var(--text); list-style:none; display:flex; justify-content:space-between; align-items:center; }
+  .gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; }
+  .item { background:#11131b; border:1px solid var(--line); border-radius:8px; overflow:hidden; display:flex; flex-direction:column; }
+  .item .imgwrap { position:relative; display:flex; align-items:center; justify-content:center; background:#0b0d13; }
+  .item img { width:100%; height:100%; object-fit:contain; cursor:zoom-in; display:block; }
+  .item .meta { padding:6px 8px; font-size:11px; color:var(--muted); line-height:1.4; max-height:42px; overflow:hidden; }
+  .item .actions { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; padding:0 8px 8px; }
+  .item .actions button { padding:6px 3px; font-size:11px; }
+  .item .actions .span3 { grid-column:span 3; }
+  .spinner { width:32px; height:32px; border:3px solid #2c3040; border-top-color:var(--accent2); border-radius:50%; animation:spin 1s linear infinite; position:absolute; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .wait { position:absolute; bottom:8px; left:0; right:0; text-align:center; font-size:11px; color:var(--muted); padding:0 6px; }
+  .err { color:#ff7a7a; font-size:12px; padding:10px; text-align:center; }
+  .empty { color:var(--muted); text-align:center; padding:50px 10px; font-size:13px; }
+  .section-title { display:flex; justify-content:space-between; align-items:center; margin:0 0 10px; }
+  .section-title h2 { font-size:16px; margin:0; }
+
+  /* ---------- 排版編輯器（電腦版 3 欄佈局） ---------- */
+  #tab-editor { height:calc(100vh - 50px); display:grid; grid-template-columns:290px 1fr 270px; position:relative; }
+  .side { background:var(--card); border-right:1px solid var(--line); overflow-y:auto; padding:12px; }
+  .side.right { border-right:none; border-left:1px solid var(--line); }
+  .side h3 { font-size:12px; margin:12px 0 6px; color:var(--muted); display:flex; justify-content:space-between; align-items:center; }
+  .side h3:first-child { margin-top:0; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
+  .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:5px; }
+  .side button { padding:7px 6px; font-size:12px; }
+  .side button.on { background:var(--accent); color:#fff; }
+  .txtbtn { text-align:left; padding:8px 10px !important; width:100%; margin-bottom:5px; }
+  .thumbs { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .thumbs img { width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:6px; cursor:pointer; border:2px solid transparent; background:#0b0d13; }
+  .thumbs img:hover { border-color:var(--accent2); }
+  .center { display:flex; flex-direction:column; min-width:0; height:100%; overflow:hidden; }
+  .topbar { display:flex; flex-wrap:nowrap; gap:5px; align-items:center; padding:6px 10px; border-bottom:1px solid var(--line); background:var(--card); overflow-x:auto; }
+  .topbar select, .topbar input { width:auto; padding:5px 6px; font-size:12px; flex:none; }
+  .topbar input[type=number] { width:60px; }
+  .topbar button { padding:5px 8px; font-size:12px; flex:none; }
+  .topbar .sp { flex:1; }
+  .topbar .export { background:var(--accent); color:#fff; font-weight:bold; }
+  #stage { flex:1; overflow:auto; display:flex; align-items:center; justify-content:center; background:#090a0f; padding:20px; position:relative; }
+  #stage.panning { cursor:grab !important; }
+  #stage.eyedrop { cursor:crosshair !important; }
+  #stage .canvas-container { box-shadow:0 4px 24px #000a; }
+  .prop-row { display:flex; gap:6px; align-items:center; margin-bottom:6px; font-size:12px; color:var(--muted); }
+  .prop-row > span { width:56px; flex:none; }
+  .prop-row input[type=color] { width:32px; height:26px; border:none; background:none; padding:0; cursor:pointer; }
+  .prop-row input[type=range] { flex:1; }
+  .prop-row select, .prop-row input[type=number], .prop-row input[type=text] { flex:1; padding:5px; }
+  .tip { font-size:11px; color:var(--muted); line-height:1.45; }
+  kbd { background:#11131b; border:1px solid var(--line); border-radius:4px; padding:1px 4px; font-size:10px; }
+  .stabs { display:grid; grid-template-columns:repeat(4,1fr); gap:4px; margin:-12px -12px 10px; padding:8px 10px; position:sticky; top:-12px; background:var(--card); z-index:3; border-bottom:1px solid var(--line); }
+  .stabs button { padding:6px 2px !important; font-size:12px !important; }
+  .stabs button.on { background:var(--accent); color:#fff; font-weight:bold; }
+  .tplgrid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .tpl { cursor:pointer; border-radius:6px; overflow:hidden; background:#0b0d13; border:1px solid var(--line); }
+  .tpl img { width:100%; aspect-ratio:1/1; object-fit:contain; display:block; background:#222533; }
+  .tpl div { font-size:11px; padding:4px 6px; color:var(--muted); }
+  .layer { display:flex; align-items:center; gap:2px; padding:5px 6px; border-radius:6px; background:var(--btn); margin-bottom:4px; cursor:pointer; font-size:12px; }
+  .layer.on { outline:2px solid var(--accent); }
+  .layer.hid .lname { opacity:.45; }
+  .layer .lname { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .layer button { padding:2px 4px !important; background:transparent; }
+  #pagebar { display:flex; gap:6px; align-items:center; padding:6px 10px; border-top:1px solid var(--line); background:var(--card); overflow-x:auto; }
+  #pagebar button { padding:5px 8px; font-size:12px; flex:none; }
+  #pageList { display:flex; gap:6px; }
+  .pg { flex:none; height:44px; min-width:26px; position:relative; border:2px solid var(--line); border-radius:4px; cursor:pointer; background:#fff; overflow:hidden; }
+  .pg.on { border-color:var(--accent2); }
+  .pg img { width:100%; height:100%; display:block; object-fit:contain; }
+  .pg span { position:absolute; left:2px; bottom:1px; font-size:9px; background:#000a; color:#fff; padding:0 3px; border-radius:3px; }
+  #pgInfo { color:var(--muted); font-size:11px; flex:none; }
+  .box-group { background:#131622; border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:8px; }
+  .box-group h4 { margin:0 0 6px; font-size:12px; color:var(--text); }
+  #ctxMenu { position:fixed; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:5px; width:180px; box-shadow:0 8px 24px #000a; z-index:99; display:none; }
+  #ctxMenu button { width:100%; text-align:left; padding:6px 8px; font-size:12px; background:transparent; border-radius:4px; display:flex; justify-content:space-between; }
+  #ctxMenu button:hover { background:var(--btn); }
+  #ctxMenu hr { border:none; border-top:1px solid var(--line); margin:4px 0; }
+  #lightbox, #eraserModal, #cloudModal { position:fixed; inset:0; background:rgba(0,0,0,.88); display:none; align-items:center; justify-content:center; z-index:100; }
+  #lightbox img { max-width:94vw; max-height:90vh; border-radius:6px; }
+  .modal-box { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:10px; max-width:92vw; max-height:90vh; width:420px; }
+  .eraser-canvas-wrap { position:relative; overflow:auto; max-width:85vw; max-height:65vh; border:1px solid var(--line); border-radius:6px; background:#000; }
+
+  /* 手機專用底部導覽列（電腦版隱藏） */
+  #mobileNav { display:none; }
+  .drawer-close-bar { display:none; }
+
+  /* ---------- 手機版響應式介面（螢幕寬度 <= 860px 自動切換） ---------- */
+  @media (max-width: 860px) {
+    header { padding:0 8px; gap:6px; height:46px; }
+    header h1 { font-size:14px; }
+    .tab { padding:5px 8px; font-size:12px; }
+    .cloud-bar input { width:70px; font-size:11px; padding:4px 5px; }
+    .cloud-bar button { padding:4px 6px; font-size:11px; }
+    #tab-gen { height:calc(100vh - 46px); }
+    #tab-gen main { grid-template-columns:1fr; padding:10px; gap:12px; }
+    .gallery { grid-template-columns:1fr 1fr; gap:8px; }
+
+    /* 手機版編輯器：全螢幕畫布 + 底部工具列 + 彈出式抽屜面板 */
+    #tab-editor { display:flex; flex-direction:column; height:calc(100vh - 46px); }
+    .center { flex:1; height:calc(100% - 50px); }
+    #stage { padding:10px; }
+    .topbar { padding:5px 8px; gap:4px; }
+    #pagebar { padding:4px 8px; }
+    .pg { height:36px; }
+
+    .side {
+      position:fixed; left:0; right:0; bottom:50px; height:58vh;
+      border-right:none; border-left:none; border-top:2px solid var(--accent);
+      border-radius:14px 14px 0 0; z-index:45; box-shadow:0 -8px 30px #000c;
+      transform:translateY(110%); transition:transform .22s ease-out;
+    }
+    .side.mobile-open { transform:translateY(0); }
+    .side .stabs { display:none; }
+    .drawer-close-bar {
+      display:flex; justify-content:space-between; align-items:center;
+      padding:0 0 8px; margin-bottom:8px; border-bottom:1px solid var(--line);
+      font-size:13px; font-weight:bold; color:var(--accent2);
+    }
+    #mobileNav {
+      display:grid; grid-template-columns:repeat(6,1fr); height:50px;
+      background:var(--card); border-top:1px solid var(--line); z-index:50; flex:none;
+    }
+    #mobileNav button {
+      border-radius:0; background:transparent; font-size:11px; padding:2px 0;
+      display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; color:var(--muted);
+    }
+    #mobileNav button.on { color:#fff; background:var(--btn); border-top:2px solid var(--accent2); font-weight:bold; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI 生圖與排版</h1>
+  <div class="tabs">
+    <button class="tab active" data-tab="gen">AI 生圖</button>
+    <button class="tab" data-tab="editor">排版編輯</button>
+  </div>
+  <!-- Firebase 雲端專案同步列 -->
+  <div class="cloud-bar">
+    <input type="text" id="cloudProjId" placeholder="專案代號" value="card01" title="輸入代號即可在手機與電腦間同步">
+    <button id="cloudSaveBtn" class="act-btn" title="儲存至 Firebase 雲端">☁️ 存雲端</button>
+    <button id="cloudLoadBtn" title="從 Firebase 雲端讀取">📥 讀雲端</button>
+    <button id="cloudCfgBtn" title="設定 Firebase 資料庫網址" style="padding:5px 6px">⚙️</button>
+  </div>
+</header>
+
+<!-- ======================= AI 生圖 ======================= -->
+<div id="tab-gen">
+<main>
+  <section class="card">
+    <label style="margin-top:0">參考圖片（選填，可提取文字排版或轉換畫風）</label>
+    <div class="drop" id="refDrop">點擊選擇圖片，或拖曳圖片至此</div>
+    <input type="file" id="refFile" accept="image/*" hidden>
+    <div id="refPanel" class="hidden">
+      <div class="refbox">
+        <img id="refImg" alt="">
+        <div class="refinfo">
+          <div id="refStatus">分析中…</div>
+          <div class="progress"><div id="refProgress"></div></div>
+          <button id="refRemove" style="margin-top:6px;padding:4px 8px;font-size:11px">移除圖片</button>
+        </div>
+      </div>
+      <div class="sub-box">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="font-size:12px;font-weight:bold;color:var(--accent2)">辨識出的圖片文字（可直接修改）</span>
+          <span id="ocrCountBadge" style="font-size:11px;color:var(--muted)">分析中</span>
+        </div>
+        <textarea id="refOcrText" style="min-height:50px;font-size:12px"></textarea>
+        <label class="check">
+          <input type="checkbox" id="refCloneLayoutChk" checked> 生圖完成後，依原圖位置自動疊加文字
+        </label>
+        <button id="refCloneToEditor" class="act-btn" style="width:100%;margin-top:6px;padding:8px;font-size:12px">
+          不生圖，直接將此圖文字與排版轉入編輯器 →
+        </button>
+      </div>
+    </div>
+
+    <label for="prompt">畫面描述（支援中英文）</label>
+    <textarea id="prompt" placeholder="例如：使徒保羅站在古希臘雅典衛城石階上向眾人宣教，遠方有帕德嫩神廟"></textarea>
+    <div class="chips" id="examples"></div>
+
+    <div class="row">
+      <div>
+        <label for="style">風格</label>
+        <select id="style">
+          <option value="">不指定</option>
+          <option value="cinematic film still, shot on ARRI Alexa 65, dramatic lighting, 8k movie scene">電影寫實</option>
+          <option value="vintage copperplate etching engraving illustration, fine crosshatching ink lines, antique cream paper background">復古銅版線畫</option>
+          <option value="medieval illuminated manuscript style, aged parchment texture, ornate gold leaf accents, historical tempera">羊皮紙手抄本</option>
+          <option value="epic fantasy digital concept art, heavy brushwork, dynamic rim lighting, rich environment">奇幻厚塗插畫</option>
+          <option value="oil painting, impressionism, visible brush strokes, masterpiece">古典油畫</option>
+          <option value="watercolor painting, soft pastel colors, paper texture">水彩畫</option>
+          <option value="Makoto Shinkai anime film style, vibrant clouds and sky, cinematic lighting, detailed background">日系光影動漫</option>
+          <option value="modern Korean manhwa webtoon illustration, sleek line art, cel-shaded vibrant coloring">韓系網漫</option>
+          <option value="Pop Mart blind box vinyl toy style, cute 3D chibi character, smooth matte PVC texture, Octane render">3D 公仔模型</option>
+          <option value="Unreal Engine 5 photorealistic 3D render, ray tracing global illumination, 8k quality">3D 擬真渲染</option>
+          <option value="traditional chinese ink painting, shuimohua, minimalism">東方水墨</option>
+          <option value="traditional Japanese Ukiyo-e woodblock print, Hokusai style, bold outlines">浮世繪版畫</option>
+          <option value="cyberpunk, neon lights, futuristic city, cinematic">賽博龐克</option>
+          <option value="flat vector illustration, minimal, clean lines, modern graphic style">平面向量插畫</option>
+          <option value="pencil sketch, black and white, hand drawn, detailed shading">鉛筆素描</option>
+        </select>
+      </div>
+      <div>
+        <label for="shotTypeSelect">鏡頭距離</label>
+        <select id="shotTypeSelect">
+          <option value="auto" selected>自動（含場景時保留全身）</option>
+          <option value="wide angle medium-long shot, full body subject in action within detailed environment, expansive background scenery, NOT a close-up">全身人物＋完整背景</option>
+          <option value="extreme wide environmental shot, grand architectural panorama, full scene composition, NOT a close-up">全景大遠景</option>
+          <option value="medium waist-up shot, clear character gesture and expression, visible background">半身中景＋背景</option>
+          <option value="close-up portrait or product shot, intricate features, shallow depth of field">臉部或物品特寫</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="size">尺寸比例</label>
+        <select id="size">
+          <option value="768x1024" selected>3:4 直向卡牌 (768×1024)</option>
+          <option value="1024x768">4:3 橫向卡牌 (1024×768)</option>
+          <option value="1024x1024">1:1 方形 (1024×1024)</option>
+          <option value="1280x720">16:9 橫式 (1280×720)</option>
+          <option value="720x1280">9:16 直式 (720×1280)</option>
+        </select>
+      </div>
+      <div>
+        <label for="count">生成張數</label>
+        <select id="count"><option selected>1</option><option>2</option><option>3</option><option>4</option></select>
+      </div>
+    </div>
+
+    <label for="seed">種子碼 Seed（留空為隨機）</label>
+    <div style="display:flex;gap:6px">
+      <input type="number" id="seed" placeholder="隨機" min="0" style="flex:1">
+      <button id="addCurrSeedFavBtn" style="padding:0 10px;font-size:12px;white-space:nowrap">收藏</button>
+      <button id="randomClearSeedBtn" style="padding:0 10px;font-size:12px;white-space:nowrap">清除</button>
+    </div>
+
+    <details class="fav-drawer" id="favDrawer">
+      <summary><span>常用 Seed 收藏清單</span><span id="favCountSpan" style="color:var(--muted);font-weight:normal">0 組 ▼</span></summary>
+      <div style="margin-top:8px">
+        <select id="favCatFilter" style="margin-bottom:6px;padding:5px;font-size:12px"></select>
+        <div id="favSeedList" style="max-height:130px;overflow-y:auto"></div>
+      </div>
+    </details>
+
+    <button id="generate" class="primary">開始生成</button>
+    <div id="status" class="status"></div>
+  </section>
+
+  <section class="card">
+    <div class="section-title"><h2>生成結果</h2><button id="clear" style="padding:5px 10px;font-size:12px">清除全部</button></div>
+    <div class="gallery" id="gallery"></div>
+    <div class="empty" id="empty">尚無圖片，輸入描述後點擊「開始生成」。</div>
+  </section>
+</main>
+</div>
+
+<!-- ======================= 排版編輯器（支援電腦三欄 / 手機底部抽屜） ======================= -->
+<div id="tab-editor" class="hidden">
+  <aside class="side" id="leftSideDrawer">
+    <div class="drawer-close-bar">
+      <span id="leftDrawerTitle">工具面板</span>
+      <button id="closeLeftDrawerBtn" style="padding:3px 8px;font-size:12px">✕ 收起</button>
+    </div>
+    <div class="stabs">
+      <button data-panel="pro" class="on">文字擷取</button>
+      <button data-panel="card">版面元件</button>
+      <button data-panel="img">圖片處理</button>
+      <button data-panel="layers">圖層/列印</button>
+    </div>
+
+    <!-- 分頁 1：文字擷取与快速修改 -->
+    <div class="spanel" data-panel="pro">
+      <div class="box-group">
+        <h4>圖片文字擷取與排版轉換</h4>
+        <div class="tip" style="margin-bottom:6px">辨識圖片中的中文字轉為可修改文字層，並自動抹除原圖舊字：</div>
+        <button id="proCloneImgBtn" class="act-btn" style="width:100%;padding:8px;margin-bottom:6px">上傳圖片 → 自動轉為可編輯文字層</button>
+        <input type="file" id="proCloneFile" accept="image/*" hidden>
+        <div class="grid2" style="margin-bottom:6px">
+          <button id="proGrabSelectedBtn">擷取選取圖文字</button>
+          <button id="proBoxGrabBtn" style="color:var(--accent2);font-weight:bold">框選區域轉文字</button>
+        </div>
+        <div class="prop-row" style="margin-top:6px;background:#1a1d27;padding:5px 7px;border-radius:6px">
+          <span style="width:68px">原圖對照</span>
+          <input type="range" id="onionSkinSlider" min="0" max="0.9" step="0.05" value="0">
+          <button id="onionUploadBtn" style="padding:3px 6px;font-size:11px">換圖</button>
+          <input type="file" id="onionFile" accept="image/*" hidden>
+        </div>
+        <div id="proOcrStatus" class="tip" style="margin-top:5px;color:var(--accent2)"></div>
+      </div>
+
+      <div class="box-group">
+        <h4>本頁文字清單（直接輸入即可修改畫布文字）</h4>
+        <div id="quickTextList" style="display:flex;flex-direction:column;gap:5px;max-height:240px;overflow-y:auto"></div>
+      </div>
+    </div>
+
+    <!-- 分頁 2：卡牌元件、文字、外框與範本 -->
+    <div class="spanel hidden" data-panel="card">
+      <h3>新增文字框</h3>
+      <button class="txtbtn" data-text="title" style="font-size:15px;font-weight:900">＋ 新增標題</button>
+      <button class="txtbtn" data-text="subtitle" style="font-size:13px;font-weight:700">＋ 新增副標題</button>
+      <button class="txtbtn" data-text="body" style="font-size:12px">＋ 新增內文</button>
+
+      <h3>預設標籤組（圖示＋文字）</h3>
+      <div class="grid2" style="margin-bottom:8px">
+        <button data-smarttag="person">人物標籤組</button>
+        <button data-smarttag="element">元素標籤組</button>
+        <button data-smarttag="bible">經文標籤框</button>
+        <button data-smarttag="score">分數圓章組</button>
+      </div>
+
+      <h3>邊框、標題橫幅與紙張底紋</h3>
+      <div class="grid2" style="margin-bottom:8px">
+        <button data-ornate="vintageBorder">雙線外框</button>
+        <button data-ornate="scrollBanner">標題捲軸橫幅</button>
+        <button data-ornate="darkBadge">左上角深色標籤</button>
+        <button data-tex="parchment">羊皮紙紋理開關</button>
+      </div>
+
+      <h3>基本幾何形狀</h3>
+      <div class="grid4" style="margin-bottom:8px">
+        <button data-shape="rect">矩形</button><button data-shape="round">圓角框</button>
+        <button data-shape="circle">圓形</button><button data-shape="line">直線</button>
+      </div>
+
+      <h3>版面範本</h3>
+      <div class="tplgrid" id="tplGrid"></div>
+    </div>
+
+    <!-- 分頁 3：圖片上傳、去背與局部塗抹消除 -->
+    <div class="spanel hidden" data-panel="img">
+      <h3>新增圖片</h3>
+      <button id="edUpload" class="act-btn" style="width:100%;padding:8px;margin-bottom:6px">從裝置選擇圖片上傳</button>
+      <input type="file" id="edFile" accept="image/*" multiple hidden>
+
+      <h3>圖片處理（請先點選畫布上的圖片）</h3>
+      <div class="grid2" style="margin-bottom:10px">
+        <button id="proRemoveBgQuick">圖片去背</button>
+        <button id="proMagicEraser">局部塗抹消除</button>
+        <button id="proMagicGrab">主角與背景分離</button>
+        <button id="pFeatherImgBtn">邊緣漸層羽化</button>
+      </div>
+
+      <h3>已生成的圖片（點擊加入畫布）</h3>
+      <div class="thumbs" id="aiThumbs"></div>
+      <div class="tip" id="aiThumbsEmpty">尚無生成圖片。</div>
+    </div>
+
+    <!-- 分頁 4：圖層管理與 A4 拼版列印 -->
+    <div class="spanel hidden" data-panel="layers">
+      <div class="box-group">
+        <h4>A4 拼版列印匯出（含十字裁切線）</h4>
+        <select id="printGridMode" style="margin-bottom:6px">
+          <option value="3x3">A4 九宮格（卡牌 63×88mm）</option>
+          <option value="2x4">A4 八格（大卡牌 / 明信片）</option>
+          <option value="2x5">A4 十格（一般名片）</option>
+        </select>
+        <button id="exportA4SheetBtn" class="act-btn" style="width:100%;padding:8px">匯出 A4 列印用 PDF</button>
+      </div>
+
+      <h3>圖層順序（👁顯示/隱藏 · 🔒鎖定/解鎖）</h3>
+      <div id="layerList"></div>
+      <div class="tip" id="layerEmpty">目前無圖層。</div>
+    </div>
+  </aside>
+
+  <!-- 中央畫布區 -->
+  <div class="center">
+    <div class="topbar">
+      <button id="mobilePanToggleBtn" title="手機單指拖曳平移畫布模式">🖐️ 移畫布</button>
+      <select id="edPreset">
+        <option value="744x1039">卡牌直式 (744×1039)</option>
+        <option value="1039x744">卡牌橫式 (1039×744)</option>
+        <option value="1080x1080" selected>方形 (1080×1080)</option>
+        <option value="1080x1350">直式海報 (1080×1350)</option>
+        <option value="1920x1080">橫式 16:9 (1920×1080)</option>
+        <option value="1240x1754">A4 直式 (1240×1754)</option>
+        <option value="custom">自訂尺寸</option>
+      </select>
+      <input type="number" id="edW" min="50" max="5000"><span style="color:var(--muted)">×</span><input type="number" id="edH" min="50" max="5000">
+      <label class="check" style="margin:0 3px;font-size:11px;white-space:nowrap"><input type="checkbox" id="magicResizeChk" checked> 等比縮放</label>
+      <button id="edUndo" title="復原">↶</button>
+      <button id="edRedo" title="重做">↷</button>
+      <button id="edZoomOut">－</button><span id="edZoom" style="font-size:11px;color:var(--muted);min-width:34px;text-align:center">100%</span><button id="edZoomIn">＋</button><button id="edFit">適應</button>
+      <button id="edEyedropBtn" title="點擊畫布吸取顏色">吸色</button>
+      <span class="sp"></span>
+      <button id="edNew">清空</button>
+      <button id="edOpen">讀檔</button><input type="file" id="edOpenFile" accept=".json,application/json" hidden>
+      <button id="edSave">存檔</button>
+      <select id="edFormat">
+        <option value="png">PNG</option>
+        <option value="jpeg">JPG</option>
+        <option value="pdf">PDF</option>
+      </select>
+      <button id="edExport" class="export">下載</button>
+    </div>
+    <div id="stage"><canvas id="c"></canvas></div>
+    <div id="pagebar">
+      <div id="pageList"></div>
+      <button id="pgAdd">＋ 新增頁</button><button id="pgDup">複製頁</button><button id="pgDel">刪除頁</button>
+      <button id="pgLeft">◀</button><button id="pgRight">▶</button><span id="pgInfo"></span>
+    </div>
+  </div>
+
+  <!-- 右側屬性面板 -->
+  <aside class="side right" id="props">
+    <div class="drawer-close-bar">
+      <span>屬性設定</span>
+      <button id="closeRightDrawerBtn" style="padding:3px 8px;font-size:12px">✕ 收起</button>
+    </div>
+    <div id="pCanvas">
+      <h3>畫布背景</h3>
+      <div class="prop-row"><span>背景色</span><input type="color" id="pBg" value="#ffffff"></div>
+      <div class="tip" style="margin-top:8px">
+        操作說明：<br>
+        • 點選畫布物件即可調整字型、顏色與大小<br>
+        • 電腦版按住 <kbd>空白鍵</kbd> 拖曳可平移畫布；手機版可點上方「🖐️ 移畫布」切換單指平移
+      </div>
+    </div>
+
+    <div id="pText" class="hidden">
+      <h3>文字設定</h3>
+      <div class="prop-row"><span>字型</span>
+        <select id="pFont">
+          <option value="Noto Sans TC">思源黑體</option>
+          <option value="Noto Serif TC">思源宋體</option>
+          <option value="LXGW WenKai TC">霞鶩文楷</option>
+          <option value="Huninn">粉圓體</option>
+          <option value="Microsoft JhengHei">微軟正黑體</option>
+          <option value="Montserrat">Montserrat</option>
+          <option value="Playfair Display">Playfair</option>
+          <option value="Bebas Neue">Bebas Neue</option>
+        </select>
+      </div>
+      <div class="prop-row"><span>字級</span><input type="number" id="pFontSize" min="6" max="1000"></div>
+      <div class="prop-row"><span>顏色</span><input type="color" id="pTextColor"></div>
+      <div class="grid3" style="margin-bottom:6px">
+        <button id="pBold" style="font-weight:900">粗體</button>
+        <button id="pItalic" style="font-style:italic">斜體</button>
+        <button id="pAlign">對齊</button>
+      </div>
+      <div class="prop-row"><span>行距</span><input type="range" id="pLine" min="0.7" max="2.5" step="0.05"></div>
+      <div class="prop-row"><span>字距</span><input type="range" id="pSpacing" min="-100" max="800" step="10"></div>
+      <div class="prop-row"><span>外框</span><input type="color" id="pTextStroke"><input type="range" id="pTextStrokeW" min="0" max="16" step="0.5"></div>
+      <div class="prop-row"><span>底色</span><input type="color" id="pTextBg"><button id="pTextBgClear" style="padding:4px 8px">清除</button></div>
+      <h3>文字樣式</h3>
+      <div class="grid4">
+        <button data-fx="none">無</button>
+        <button data-fx="shadow">陰影</button>
+        <button data-fx="outline">白框</button>
+        <button data-fx="gold">深框金字</button>
+      </div>
+    </div>
+
+    <div id="pShape" class="hidden">
+      <h3>形狀設定</h3>
+      <div class="prop-row"><span>填色</span><input type="color" id="pFill"><button id="pFillClear" style="padding:4px 8px">透明</button></div>
+      <div class="prop-row" id="pStrokeRow"><span>邊框</span><input type="color" id="pStroke"><input type="range" id="pStrokeW" min="0" max="40" step="1"></div>
+      <div class="prop-row" id="pRadiusRow"><span>圓角</span><input type="range" id="pRadius" min="0" max="200" step="1"></div>
+    </div>
+
+    <div id="pImage" class="hidden">
+      <h3>圖片設定</h3>
+      <button id="pGrabTextBtn" class="act-btn" style="width:100%;margin-bottom:6px;padding:8px">擷取圖中文字轉為文字層</button>
+      <div class="grid2" style="margin-bottom:8px">
+        <button id="pCover">設為背景填滿</button>
+        <button id="pRemoveBg">圖片去背</button>
+      </div>
+      <div class="prop-row"><span>圓角</span><input type="range" id="pImgRadius" min="0" max="50" step="1"></div>
+      <div class="prop-row"><span>亮度</span><input type="range" id="pBright" min="-0.5" max="0.5" step="0.02" value="0"></div>
+      <div class="prop-row"><span>對比</span><input type="range" id="pContrast" min="-0.5" max="0.5" step="0.02" value="0"></div>
+      <div class="prop-row"><span>飽和度</span><input type="range" id="pSat" min="-1" max="1" step="0.05" value="0"></div>
+      <div class="tip" id="bgStatus" style="margin-top:4px"></div>
+    </div>
+
+    <div id="pMulti" class="hidden">
+      <h3>群組設定</h3>
+      <div class="grid2" style="margin-bottom:8px">
+        <button id="pGroup">組成群組</button>
+        <button id="pUngroup">取消群組</button>
+      </div>
+    </div>
+
+    <div id="pCommon" class="hidden">
+      <h3>對齊與順序</h3>
+      <div class="prop-row"><span>透明度</span><input type="range" id="pOpacity" min="0.05" max="1" step="0.05"></div>
+      <div class="grid3" style="margin-bottom:6px">
+        <button data-align="left">靠左</button><button data-align="hcenter">水平置中</button><button data-align="right">靠右</button>
+        <button data-align="top">靠上</button><button data-align="vcenter">垂直置中</button><button data-align="bottom">靠下</button>
+      </div>
+      <div class="grid4" style="margin-bottom:6px">
+        <button id="pFront">最上層</button><button id="pFwd">上移</button><button id="pBwd">下移</button><button id="pBack">最底層</button>
+      </div>
+      <div class="grid2">
+        <button id="pDup">複製</button><button id="pLock">鎖定</button>
+        <button id="pDel" style="grid-column:span 2;background:#5a2330">刪除物件</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 手機版專用底部導覽列 -->
+  <nav id="mobileNav">
+    <button data-mnav="pro"><span>🔍</span><span>文字擷取</span></button>
+    <button data-mnav="card"><span>📐</span><span>版面元件</span></button>
+    <button data-mnav="img"><span>🖼️</span><span>圖片處理</span></button>
+    <button data-mnav="layers"><span>📑</span><span>圖層/列印</span></button>
+    <button data-mnav="props"><span>⚙️</span><span>屬性調整</span></button>
+    <button data-mnav="close"><span>🖼️</span><span>只看畫布</span></button>
+  </nav>
+</div>
+
+<!-- 右鍵選單與視窗 -->
+<div id="ctxMenu">
+  <button data-ctx="grabtext"><span>擷取圖片文字</span></button>
+  <hr>
+  <button data-ctx="dup"><span>複製物件</span><kbd>Ctrl+D</kbd></button>
+  <button data-ctx="front"><span>移到最上層</span></button>
+  <button data-ctx="back"><span>移到最底層</span></button>
+  <button data-ctx="lock"><span>鎖定 / 解鎖</span></button>
+  <hr>
+  <button data-ctx="del" style="color:#ff7a7a"><span>刪除</span><kbd>Del</kbd></button>
+</div>
+
+<div id="eraserModal">
+  <div class="modal-box" style="width:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h3 style="margin:0;font-size:14px">局部塗抹消除（塗抹要修補的區域）</h3>
+      <button id="eraserCancel" style="background:#5a2330;padding:5px 10px">取消</button>
+    </div>
+    <div class="prop-row" style="margin:0">
+      <span>筆刷粗細</span><input type="range" id="eraserSize" min="8" max="100" value="32">
+      <button id="eraserApply" class="act-btn" style="padding:7px 14px">執行消除</button>
+    </div>
+    <div class="eraser-canvas-wrap"><canvas id="eraserCanvas"></canvas></div>
+  </div>
+</div>
+
+<!-- Firebase 網址設定視窗 -->
+<div id="cloudModal">
+  <div class="modal-box">
+    <h3 style="margin:0;font-size:15px">雲端資料庫設定 (Firebase Realtime DB)</h3>
+    <div class="tip">輸入你的 Firebase Realtime Database 網址，即可在手機與電腦之間直接同步排版專案與收藏的 Seed：</div>
+    <input type="text" id="fbUrlInput" value="https://pict-aiandedit-default-rtdb.firebaseio.com/">
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button id="fbModalClose" style="padding:7px 14px">關閉</button>
+      <button id="fbModalSave" class="act-btn" style="padding:7px 14px">儲存設定</button>
+    </div>
+  </div>
+</div>
+
+<div id="lightbox"><img alt=""></div>
+
+<script>
+/* =====================================================================
+   第 1 部分腳本：共用工具 + IndexedDB + 中文 OCR 引擎 + AI 生圖
+   ===================================================================== */
+const IMG_API = "https://image.pollinations.ai/prompt/";
+const COOLDOWN_MS = 8000;
+const LAST_KEY = "ai-img-last";
+const FAV_KEY = "ai-studio-fav-seeds-v1";
+const FB_URL_KEY = "ai-studio-fb-url";
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const hasCJK = s => /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(s);
+const rand = () => Math.floor(Math.random() * 1e9);
+function setStatus(t) { if ($("status")) $("status").textContent = t; }
+const blobToDataURL = b => new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); });
+const loadScript = (() => {
+  const cache = {};
+  return src => cache[src] || (cache[src] = new Promise((res, rej) => {
+    const el = document.createElement("script"); el.src = src; el.onload = res;
+    el.onerror = () => { delete cache[src]; el.remove(); rej(new Error("無法載入 " + src)); };
+    document.head.appendChild(el);
+  }));
+})();
+
+const dbReady = new Promise((resolve, reject) => {
+  const req = indexedDB.open("ai-image-studio", 1);
+  req.onupgradeneeded = () => { req.result.createObjectStore("images", { keyPath: "id" }); req.result.createObjectStore("kv"); };
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+async function idb(storeName, mode, fn) {
+  const d = await dbReady;
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction(storeName, mode);
+    const r = fn(tx.objectStore(storeName));
+    tx.oncomplete = () => resolve(r && r.result);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+const imgPut = e => idb("images", "readwrite", s => s.put(e));
+const imgDel = id => idb("images", "readwrite", s => s.delete(id));
+const imgAll = () => idb("images", "readonly", s => s.getAll());
+const imgClear = () => idb("images", "readwrite", s => s.clear());
+const kvGet = k => idb("kv", "readonly", s => s.get(k));
+const kvSet = (k, v) => idb("kv", "readwrite", s => s.put(v, k));
+
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
+  $("tab-gen").classList.toggle("hidden", name !== "gen");
+  $("tab-editor").classList.toggle("hidden", name !== "editor");
+  if (name === "editor" && typeof Editor !== "undefined") { Editor.init(); Editor.refreshAiThumbs(); requestAnimationFrame(() => Editor.fit()); }
+}
+
+async function translateText(text, targetLang = "en") {
+  if (!text || !text.trim()) return "";
+  const q = encodeURIComponent(text.trim());
+  const timeout = new Promise(r => setTimeout(() => r(null), 2500));
+  try {
+    const gProm = fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${q}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(j => j && j[0] ? j[0].map(x => x[0]).join("") : null)
+      .catch(() => null);
+    const res = await Promise.race([gProm, timeout]);
+    if (res && res.trim()) return res.trim();
+  } catch {}
+  return text;
+}
+const translateToEnglish = text => translateText(text, "en");
+
+/* =====================================================================
+   中文 OCR 辨識與筆畫無痕抹除引擎
+   ===================================================================== */
+const OCRLayoutEngine = (() => {
+  let workerProm = null;
+  function getWorker(onProgress) {
+    if (!workerProm) {
+      workerProm = Tesseract.createWorker("chi_tra+eng", 1, {
+        logger: m => { if (m.status === "recognizing text" && onProgress) onProgress(m.progress || 0); }
+      }).catch(e => { workerProm = null; throw e; });
+    }
+    return workerProm;
+  }
+
+  const lum = (r, g, b) => r * 0.299 + g * 0.587 + b * 0.114;
+  const rgbHex = (r, g, b) => "#" + [r, g, b].map(x => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, "0")).join("");
+
+  function makeScaledCanvas(srcCanvas, scale) {
+    const c = document.createElement("canvas");
+    c.width = Math.max(100, Math.round(srcCanvas.width * scale));
+    c.height = Math.max(100, Math.round(srcCanvas.height * scale));
+    c.getContext("2d").drawImage(srcCanvas, 0, 0, c.width, c.height);
+    return c;
+  }
+
+  function makeInvertedDarkBadgesCanvas(srcCanvas, scale = 0.65) {
+    const c = makeScaledCanvas(srcCanvas, scale), w = c.width, h = c.height;
+    const ctx = c.getContext("2d"), imgData = ctx.getImageData(0, 0, w, h), d = imgData.data;
+    const block = 14, gw = Math.ceil(w / block), gh = Math.ceil(h / block), gridLum = new Float32Array(gw * gh);
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        let sum = 0, cnt = 0;
+        for (let y = gy * block; y < Math.min(h, (gy + 1) * block); y += 2) {
+          for (let x = gx * block; x < Math.min(w, (gx + 1) * block); x += 2) {
+            const i = (y * w + x) * 4; sum += lum(d[i], d[i + 1], d[i + 2]); cnt++;
+          }
+        }
+        gridLum[gy * gw + gx] = sum / (cnt || 1);
+      }
+    }
+    for (let y = 0; y < h; y++) {
+      const gy = Math.min(gh - 1, Math.floor(y / block));
+      for (let x = 0; x < w; x++) {
+        const gx = Math.min(gw - 1, Math.floor(x / block)), i = (y * w + x) * 4, l = lum(d[i], d[i + 1], d[i + 2]);
+        if (gridLum[gy * gw + gx] < 115) {
+          const inv = 255 - l, v = inv < 120 ? Math.max(0, inv * 0.35) : 255;
+          d[i] = d[i + 1] = d[i + 2] = v;
+        } else {
+          d[i] = d[i + 1] = d[i + 2] = 255;
+        }
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return c;
+  }
+
+  function sampleAccurateColors(ctx, imgW, imgH, bbox) {
+    const x0 = Math.max(0, Math.floor(bbox.x0)), y0 = Math.max(0, Math.floor(bbox.y0));
+    const w = Math.min(imgW - x0, Math.max(4, Math.ceil(bbox.x1 - bbox.x0)));
+    const h = Math.min(imgH - y0, Math.max(4, Math.ceil(bbox.y1 - bbox.y0)));
+    const data = ctx.getImageData(x0, y0, w, h).data, pixels = [];
+    for (let i = 0; i < data.length; i += 4) pixels.push({ r: data[i], g: data[i + 1], b: data[i + 2], l: lum(data[i], data[i + 1], data[i + 2]) });
+    pixels.sort((a, b) => a.l - b.l);
+    const medianLum = pixels[Math.floor(pixels.length * 0.55)].l, isDarkBg = medianLum < 110;
+    const bgSlice = isDarkBg ? pixels.slice(0, Math.max(1, Math.floor(pixels.length * 0.4))) : pixels.slice(Math.floor(pixels.length * 0.6));
+    const fgSlice = isDarkBg ? pixels.slice(Math.floor(pixels.length * 0.85)) : pixels.slice(0, Math.max(1, Math.floor(pixels.length * 0.15)));
+    const avg = arr => { let r = 0, g = 0, b = 0; arr.forEach(p => { r += p.r; g += p.g; b += p.b; }); const n = arr.length || 1; return [r / n, g / n, b / n]; };
+    let [bgR, bgG, bgB] = avg(bgSlice), [fgR, fgG, fgB] = avg(fgSlice);
+    const bgLum = lum(bgR, bgG, bgB);
+    if (Math.abs(lum(fgR, fgG, fgB) - bgLum) < 60) {
+      if (isDarkBg) { fgR = 244; fgG = 236; fgB = 216; } else { fgR = 30; fgG = 45; fgB = 36; }
+    }
+    return { bgColor: rgbHex(bgR, bgG, bgB), fgColor: rgbHex(fgR, fgG, fgB), bgRGB: [bgR, bgG, bgB], isDarkBg, bgLum };
+  }
+
+  function detectBestFont(text, relH, bgRGB) {
+    if (/^[A-Z0-9\s\-:]+$/.test(text)) return "Montserrat";
+    const isWarmParchment = bgRGB && (bgRGB[0] - bgRGB[2] > 22);
+    if (isWarmParchment && relH > 0.045) return "Noto Serif TC";
+    if (isWarmParchment && /行傳|福音|詩篇|創世|書|章/.test(text)) return "LXGW WenKai TC";
+    return "Noto Sans TC";
+  }
+
+  function eraseTextWithGrain(sourceCanvas, lines) {
+    const out = document.createElement("canvas"); out.width = sourceCanvas.width; out.height = sourceCanvas.height;
+    const ctx = out.getContext("2d"); ctx.drawImage(sourceCanvas, 0, 0);
+    lines.forEach(ln => {
+      const pad = Math.max(3, Math.round(ln.height * 0.06));
+      const x0 = Math.max(0, Math.floor(ln.x - pad)), y0 = Math.max(0, Math.floor(ln.y - pad));
+      const w = Math.min(out.width - x0, Math.ceil(ln.width + pad * 2)), h = Math.min(out.height - y0, Math.ceil(ln.height + pad * 2));
+      if (w <= 2 || h <= 2) return;
+      const imgData = ctx.getImageData(x0, y0, w, h), d = imgData.data, mask = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        const l = lum(d[i * 4], d[i * 4 + 1], d[i * 4 + 2]);
+        if (ln.isDarkBg ? (l > ln.bgLum + 26) : (l < ln.bgLum - 26)) mask[i] = 1;
+      }
+      const dilated = new Uint8Array(mask);
+      for (let y = 2; y < h - 2; y++) for (let x = 2; x < w - 2; x++) {
+        const i = y * w + x;
+        if (mask[i] || mask[i - 1] || mask[i + 1] || mask[i - w] || mask[i + w] || mask[i - 2] || mask[i + 2] || mask[i - w * 2] || mask[i + w * 2]) dilated[i] = 1;
+      }
+      const [baseR, baseG, baseB] = ln.bgRGB || [232, 223, 200];
+      for (let y = 0; y < h; y++) {
+        let rowR = 0, rowG = 0, rowB = 0, rowCnt = 0;
+        for (let x = 0; x < w; x++) { const i = y * w + x; if (!dilated[i]) { rowR += d[i * 4]; rowG += d[i * 4 + 1]; rowB += d[i * 4 + 2]; rowCnt++; } }
+        const rBg = rowCnt > 4 ? rowR / rowCnt : baseR, gBg = rowCnt > 4 ? rowG / rowCnt : baseG, bBg = rowCnt > 4 ? rowB / rowCnt : baseB;
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x; if (!dilated[i]) continue;
+          const grain = ((x * 37 + y * 17) % 9) - 4;
+          d[i * 4] = Math.max(0, Math.min(255, rBg + grain));
+          d[i * 4 + 1] = Math.max(0, Math.min(255, gBg + grain));
+          d[i * 4 + 2] = Math.max(0, Math.min(255, bBg + grain));
+        }
+      }
+      ctx.putImageData(imgData, x0, y0);
+    });
+    return out.toDataURL("image/jpeg", 0.95);
+  }
+
+  function extractCleanBlocksFromResult(ret, scale, imgW, imgH) {
+    const rawLines = ret?.data?.lines || [], blocks = [];
+    for (const line of rawLines) {
+      const validWords = (line.words || []).filter(w => {
+        const t = (w.text || "").trim();
+        if (!t || w.confidence < 40) return false;
+        if (/^[|_~`.,:;'"!?\\/=\-+<>()[\]{}@#$%^&*©®™§£¥€]+$/.test(t)) return false;
+        const bh = (w.bbox.y1 - w.bbox.y0) / scale;
+        if (bh < imgH * 0.015 || bh > imgH * 0.22) return false;
+        if (t.length === 1 && !/[\u4e00-\u9fff0-9]/.test(t) && w.confidence < 82) return false;
+        if (/^[Iil1|O0Q〇口日目川三]{1,3}$/.test(t) && w.confidence < 78) return false;
+        return true;
+      });
+      if (!validWords.length) continue;
+      validWords.sort((a, b) => a.bbox.x0 - b.bbox.x0);
+      const medH = validWords.map(w => w.bbox.y1 - w.bbox.y0).sort((a, b) => a - b)[Math.floor(validWords.length / 2)];
+      let cur = null;
+      for (const w of validWords) {
+        if (validWords.length > 1 && (w.bbox.y1 - w.bbox.y0) > medH * 1.65) continue;
+        if (!cur) cur = { words: [w], x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1 };
+        else if (w.bbox.x0 - cur.x1 < medH * 1.35) {
+          cur.words.push(w); cur.x0 = Math.min(cur.x0, w.bbox.x0); cur.y0 = Math.min(cur.y0, w.bbox.y0); cur.x1 = Math.max(cur.x1, w.bbox.x1); cur.y1 = Math.max(cur.y1, w.bbox.y1);
+        } else { blocks.push(cur); cur = { words: [w], x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1 }; }
+      }
+      if (cur) blocks.push(cur);
+    }
+    return blocks.map(b => {
+      if (b.words.length > 1 && b.words[0].confidence < 74 && !/[\u4e00-\u9fff]/.test(b.words[0].text)) {
+        b.words.shift();
+        b.x0 = Math.min(...b.words.map(w => w.bbox.x0)); b.y0 = Math.min(...b.words.map(w => w.bbox.y0));
+        b.x1 = Math.max(...b.words.map(w => w.bbox.x1)); b.y1 = Math.max(...b.words.map(w => w.bbox.y1));
+      }
+      let text = "";
+      b.words.forEach((w, i) => {
+        const t = w.text.trim();
+        if (i > 0 && /^[A-Za-z0-9\-:]+$/.test(b.words[i - 1].text.trim()) && /^[A-Za-z0-9\-:]+$/.test(t)) text += " ";
+        text += t;
+      });
+      text = text.replace(/^[^\u4e00-\u9fffA-Za-z0-9]+/, "").replace(/[xX＊*](\d)/g, "×$1").trim();
+      const avgConf = b.words.reduce((s, w) => s + w.confidence, 0) / b.words.length;
+      const x0 = b.x0 / scale, y0 = b.y0 / scale, x1 = b.x1 / scale, y1 = b.y1 / scale;
+      return { text, x0, y0, x1, y1, width: x1 - x0, height: y1 - y0, conf: avgConf };
+    }).filter(b => b.text && b.width > 12 && b.height > 12);
+  }
+
+  function mergeMultiPassBlocks(allBlocks) {
+    allBlocks.sort((a, b) => (((b.text.match(/[\u4e00-\u9fff]/g) || []).length * 20 + b.conf) - ((a.text.match(/[\u4e00-\u9fff]/g) || []).length * 20 + a.conf)));
+    const kept = [];
+    for (const b of allBlocks) {
+      const overlaps = kept.some(k => {
+        const ix0 = Math.max(k.x0, b.x0), iy0 = Math.max(k.y0, b.y0), ix1 = Math.min(k.x1, b.x1), iy1 = Math.min(k.y1, b.y1);
+        return (ix1 > ix0 && iy1 > iy0) && ((ix1 - ix0) * (iy1 - iy0)) / Math.min(k.width * k.height, b.width * b.height) > 0.42;
+      });
+      if (!overlaps) kept.push(b);
+    }
+    kept.sort((a, b) => Math.abs(a.y0 - b.y0) > 25 ? a.y0 - b.y0 : a.x0 - b.x0);
+    return kept;
+  }
+
+  async function analyze(blobOrUrl, onProgress) {
+    const img = await new Promise((res, rej) => {
+      const im = new Image(); im.crossOrigin = "anonymous"; im.onload = () => res(im); im.onerror = rej;
+      im.src = typeof blobOrUrl === "string" ? blobOrUrl : URL.createObjectURL(blobOrUrl);
+    });
+    const cv = document.createElement("canvas"), W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext("2d"); ctx.drawImage(img, 0, 0);
+    const worker = await getWorker(onProgress);
+
+    const scale1 = Math.min(1, 1150 / Math.max(W, H)), ret1 = await worker.recognize(makeScaledCanvas(cv, scale1));
+    const scale2 = Math.min(0.45, 520 / Math.max(W, H)), ret2 = await worker.recognize(makeScaledCanvas(cv, scale2));
+    const scale3 = Math.min(0.75, 900 / Math.max(W, H)), ret3 = await worker.recognize(makeInvertedDarkBadgesCanvas(cv, scale3));
+
+    const merged = mergeMultiPassBlocks([
+      ...extractCleanBlocksFromResult(ret1, scale1, W, H),
+      ...extractCleanBlocksFromResult(ret2, scale2, W, H),
+      ...extractCleanBlocksFromResult(ret3, scale3, W, H)
+    ]);
+
+    const lines = merged.map(b => {
+      const colorInfo = sampleAccurateColors(ctx, W, H, b);
+      const centerX = (b.x0 + b.x1) / 2, relH = b.height / H;
+      return {
+        text: b.text, x: b.x0, y: b.y0, width: b.width, height: b.height,
+        relX: b.x0 / W, relY: b.y0 / H, relW: b.width / W, relH,
+        relCenterX: centerX / W, relCenterY: (b.y0 + b.y1) / 2 / H,
+        align: Math.abs(centerX - W / 2) < W * 0.12 ? "center" : "left",
+        fgColor: colorInfo.fgColor, bgColor: colorInfo.bgColor, bgRGB: colorInfo.bgRGB,
+        isDarkBg: colorInfo.isDarkBg, bgLum: colorInfo.bgLum,
+        isBold: relH > 0.038,
+        fontFamily: detectBestFont(b.text, relH, colorInfo.bgRGB)
+      };
+    });
+
+    const cleanedDataUrl = lines.length ? eraseTextWithGrain(cv, lines) : cv.toDataURL("image/jpeg", 0.95);
+    return { width: W, height: H, lines, cleanedDataUrl, originalDataUrl: cv.toDataURL("image/jpeg", 0.95) };
+  }
+
+  async function compositeLayoutOntoImage(baseBlobOrUrl, ocrLines, customLinesText) {
+    const img = await new Promise((res, rej) => {
+      const im = new Image(); im.crossOrigin = "anonymous"; im.onload = () => res(im); im.onerror = rej;
+      im.src = typeof baseBlobOrUrl === "string" ? blobOrUrl : URL.createObjectURL(baseBlobOrUrl);
+    });
+    const cv = document.createElement("canvas"), W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext("2d"); ctx.drawImage(img, 0, 0);
+    const overrideArr = (customLinesText || "").split("\n").map(s => s.trim()).filter(Boolean);
+    ocrLines.forEach((ln, idx) => {
+      const txt = overrideArr[idx] !== undefined ? overrideArr[idx] : ln.text;
+      if (!txt) return;
+      const fontSize = Math.max(14, Math.round(ln.relH * H * 0.88));
+      ctx.save();
+      ctx.font = `${ln.isBold ? "900" : "700"} ${fontSize}px "${ln.fontFamily || "Noto Sans TC"}", sans-serif`;
+      ctx.textBaseline = "middle"; ctx.textAlign = ln.align || "center";
+      const drawX = ln.align === "center" ? ln.relCenterX * W : ln.relX * W, drawY = ln.relCenterY * H;
+      ctx.fillStyle = ln.fgColor || "#2a180c"; ctx.fillText(txt, drawX, drawY);
+      ctx.restore();
+    });
+    return new Promise(res => cv.toBlob(b => res(b), "image/jpeg", 0.95));
+  }
+
+  return { analyze, compositeLayoutOntoImage, sampleAccurateColors, eraseTextWithGrain, getWorker };
+})();
+
+/* =====================================================================
+   Seed 收藏清單 + 參考圖分析 + AI 生圖排隊引擎
+   ===================================================================== */
+function loadFavSeeds() {
+  try { return JSON.parse(localStorage.getItem(FAV_KEY) || "[]"); } catch { return []; }
+}
+function saveFavSeeds(list) {
+  localStorage.setItem(FAV_KEY, JSON.stringify(list));
+  renderFavSeedsUI();
+}
+function addSeedToFav(seed, defaultName = "", category = "常用", styleVal = "") {
+  if (!seed && seed !== 0) return alert("請先輸入或產生一個 Seed 數字");
+  const name = prompt("請輸入此 Seed 的名稱：", defaultName || `構圖 #${seed}`);
+  if (!name) return;
+  const cat = prompt("分類標籤（例如：人物、場景、卡牌）：", category) || "常用";
+  const list = loadFavSeeds().filter(x => String(x.seed) !== String(seed));
+  list.unshift({ seed: Number(seed), name: name.trim(), category: cat.trim(), style: styleVal || $("style")?.value || "", time: Date.now() });
+  saveFavSeeds(list);
+  if ($("favDrawer")) $("favDrawer").open = true;
+}
+function renderFavSeedsUI() {
+  const list = loadFavSeeds(), catSel = $("favCatFilter"), filterCat = catSel?.value || "ALL";
+  if ($("favCountSpan")) $("favCountSpan").textContent = `${list.length} 組 ▼`;
+  const cats = ["ALL", ...new Set(list.map(x => x.category))];
+  if (catSel) {
+    const prev = catSel.value || "ALL";
+    catSel.innerHTML = cats.map(c => `<option value="${c}">${c === "ALL" ? "全部類別 (" + list.length + ")" : c}</option>`).join("");
+    if (cats.includes(prev)) catSel.value = prev;
+  }
+  const filtered = filterCat === "ALL" ? list : list.filter(x => x.category === filterCat);
+  const listEl = $("favSeedList");
+  if (!listEl) return;
+  if (!filtered.length) {
+    listEl.innerHTML = `<div class="tip" style="text-align:center;padding:6px">尚無收藏項目</div>`;
+    return;
+  }
+  listEl.innerHTML = "";
+  filtered.forEach(item => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;justify-content:space-between;background:#1a1d27;border:1px solid #2c3040;border-radius:6px;padding:5px 8px;margin-bottom:4px;gap:6px";
+    row.innerHTML = `
+      <div style="flex:1;min-width:0;cursor:pointer">
+        <div style="font-size:12px;font-weight:bold;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          <span style="background:#2d2560;color:var(--accent2);padding:1px 5px;border-radius:4px;font-size:10px;margin-right:4px">${item.category}</span>${item.name}
+        </div>
+        <div style="font-size:10px;color:var(--muted)">Seed: ${item.seed}</div>
+      </div>
+      <button class="apply-fav" style="padding:3px 7px;font-size:11px;background:var(--accent);color:#fff">套用</button>
+      <button class="del-fav" style="padding:3px 6px;font-size:11px;background:#5a2330;color:#fff">✕</button>
+    `;
+    const applyFn = () => {
+      $("seed").value = item.seed;
+      if (item.style && $("style")) $("style").value = item.style;
+      setStatus(`已套用 Seed：${item.name} (${item.seed})`);
+    };
+    row.querySelector("div").onclick = applyFn;
+    row.querySelector(".apply-fav").onclick = applyFn;
+    row.querySelector(".del-fav").onclick = () => { if (confirm(`確定移除「${item.name}」？`)) saveFavSeeds(loadFavSeeds().filter(x => x.seed !== item.seed)); };
+    listEl.appendChild(row);
+  });
+}
+if ($("addCurrSeedFavBtn")) $("addCurrSeedFavBtn").onclick = () => addSeedToFav($("seed").value);
+if ($("randomClearSeedBtn")) $("randomClearSeedBtn").onclick = () => { $("seed").value = ""; setStatus("已設為隨機種子碼"); };
+if ($("favCatFilter")) $("favCatFilter").onchange = renderFavSeedsUI;
+renderFavSeedsUI();
+
+const Ref = { blob: null, ocrLines: [], ocrResult: null };
+async function setReference(file) {
+  if (!file || !file.type.startsWith("image/")) return;
+  Ref.blob = file; Ref.ocrLines = []; Ref.ocrResult = null;
+  $("refPanel").classList.remove("hidden"); $("refImg").src = URL.createObjectURL(file);
+  $("refOcrText").value = ""; $("ocrCountBadge").textContent = "掃描中…";
+  try {
+    $("refStatus").textContent = "正在辨識圖片文字與座標…";
+    const ocrRes = await OCRLayoutEngine.analyze(file, p => { $("refProgress").style.width = (p * 100).toFixed(1) + "%"; });
+    if (Ref.blob !== file) return;
+    Ref.ocrResult = ocrRes; Ref.ocrLines = ocrRes.lines;
+    $("ocrCountBadge").textContent = `共 ${ocrRes.lines.length} 行文字`;
+    $("refOcrText").value = ocrRes.lines.map(l => l.text).join("\n");
+    $("refCloneLayoutChk").checked = ocrRes.lines.length > 0;
+    $("refProgress").style.width = "100%";
+    $("refStatus").textContent = "分析完成";
+  } catch {
+    $("ocrCountBadge").textContent = "無文字";
+    $("refStatus").textContent = "參考圖已載入";
+  }
+}
+function clearReference() {
+  Ref.blob = null; Ref.ocrLines = []; Ref.ocrResult = null;
+  $("refPanel").classList.add("hidden"); $("refFile").value = "";
+}
+$("refDrop").onclick = () => $("refFile").click();
+$("refFile").onchange = e => setReference(e.target.files[0]);
+$("refRemove").onclick = clearReference;
+["dragover", "dragenter"].forEach(ev => $("refDrop").addEventListener(ev, e => { e.preventDefault(); $("refDrop").classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => $("refDrop").addEventListener(ev, e => { e.preventDefault(); $("refDrop").classList.remove("over"); }));
+$("refDrop").addEventListener("drop", e => setReference(e.dataTransfer.files[0]));
+$("refCloneToEditor").onclick = async () => {
+  if (!Ref.blob) return;
+  showTab("editor");
+  if (typeof Editor !== "undefined") await Editor.cloneImageLayoutToCanvas(Ref.ocrResult || await OCRLayoutEngine.analyze(Ref.blob), $("refOcrText").value);
+};
+
+async function removeCornerWatermark(blob) {
+  try {
+    const img = await createImageBitmap(blob), W = img.width, H = img.height;
+    const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+    const ctx = cv.getContext("2d"); ctx.drawImage(img, 0, 0);
+    const wmW = Math.min(180, Math.round(W * 0.22)), wmH = Math.min(36, Math.round(H * 0.042));
+    const x0 = W - wmW, y0 = H - wmH;
+    const refData = ctx.getImageData(x0, Math.max(0, y0 - wmH), wmW, wmH).data;
+    const target = ctx.getImageData(x0, y0, wmW, wmH), d = target.data;
+    for (let y = 0; y < wmH; y++) {
+      const blend = y / wmH;
+      for (let x = 0; x < wmW; x++) {
+        const i = (y * wmW + x) * 4, refRow = Math.min(wmH - 1, Math.max(0, wmH - 1 - (y % 6))), ri = (refRow * wmW + x) * 4;
+        const diff = Math.abs(d[i] - refData[ri]) + Math.abs(d[i + 1] - refData[ri + 1]) + Math.abs(d[i + 2] - refData[ri + 2]);
+        if (diff > 65 || y > wmH * 0.35) {
+          d[i] = Math.round(d[i] * (1 - blend * 0.85) + refData[ri] * (blend * 0.85));
+          d[i + 1] = Math.round(d[i + 1] * (1 - blend * 0.85) + refData[ri + 1] * (blend * 0.85));
+          d[i + 2] = Math.round(d[i + 2] * (1 - blend * 0.85) + refData[ri + 2] * (blend * 0.85));
+        }
+      }
+    }
+    ctx.putImageData(target, x0, y0);
+    return await new Promise(res => cv.toBlob(b => res(b || blob), "image/jpeg", 0.95));
+  } catch { return blob; }
+}
+
+["使徒保羅站在雅典衛城石階向眾人宣教，遠方帕德嫩神廟", "櫻花樹下的柴犬，午後陽光", "台北101夜景，霓虹燈倒影", "山中日式溫泉旅館，雪景"].forEach(t => {
+  const b = document.createElement("button"); b.className = "chip"; b.textContent = t; b.onclick = () => { $("prompt").value = t; }; $("examples")?.appendChild(b);
+});
+
+async function buildPrompt(raw) {
+  const style = $("style").value;
+  let cleanRaw = raw
+    .replace(/排版(跟|與|和)?(它|他|原圖|圖片)?(一模)?一樣/g, "")
+    .replace(/文字(跟|與|和)?(我給的圖|原圖|它|他)?(一模)?一樣/g, "")
+    .trim();
+
+  const hasSceneOrAction = /在|背景|風景|場景|街|路|城市|店|房|室|山|海|河|森林|公園|學校|舞台|建築|雅典|衛城|神廟|羅馬|聖經|故事|站|走|跑|跳|坐|宣教|講道|全身|遠景|全景/.test(cleanRaw);
+  const asksDetailedFace = /人臉|臉部|五官|表情|眼神|刻劃|仔細|詳細/.test(cleanRaw);
+
+  if (hasSceneOrAction && asksDetailedFace) {
+    cleanRaw = cleanRaw
+      .replace(/人臉的?刻劃幫我做詳細一點[，,、]?/g, "")
+      .replace(/人臉|臉部/g, "人物全身衣著與神態表情")
+      .replace(/做仔細一點/g, "背景建築環境與人物刻劃細膩豐富");
+  }
+
+  let p = cleanRaw || raw;
+  if (hasCJK(p)) {
+    setStatus("正在準備提示詞…");
+    p = (await translateToEnglish(p)) || p;
+  }
+  const baseEn = style ? `${p}, ${style}` : p;
+
+  const shotMode = $("shotTypeSelect")?.value || "auto";
+  const shotPrompt = shotMode === "auto"
+    ? (hasSceneOrAction ? "wide environmental medium-long shot showing full body subject in action and complete background architecture, sharp facial expression, NOT a close-up face portrait" : "")
+    : shotMode;
+
+  const negProtection = "well-balanced composition, no cropped head, no extreme close-up face, no deformed hands, no gibberish text, no watermark, sharp focus";
+  return [baseEn, shotPrompt, negProtection].filter(Boolean).join(", ");
+}
+
+function imageUrl(e, overrideModel = null) {
+  const [w, h] = e.size.split("x");
+  const q = new URLSearchParams({
+    width: w, height: h, seed: e.seed,
+    model: overrideModel || "flux",
+    nologo: "true", private: "true", safe: "false"
+  });
+  return IMG_API + encodeURIComponent(e.prompt) + "?" + q.toString();
+}
+function refreshEmpty() { $("empty").style.display = $("gallery").children.length ? "none" : "block"; }
+
+function createCard(entry, prepend = true) {
+  const item = document.createElement("div"); item.className = "item";
+  item.innerHTML = `
+    <div class="imgwrap"><div class="spinner"></div><span class="wait"></span><img alt="" style="display:none"></div>
+    <div class="meta"></div>
+    <div class="actions">
+      <button data-a="dl">下載</button><button data-a="redo">重畫</button><button data-a="del">刪除</button>
+      <button data-a="seed">用此Seed</button><button data-a="fav">收藏Seed</button><button data-a="copy">複製描述</button>
+      <button data-a="layout" class="span3 act-btn">轉入排版編輯器 →</button>
+    </div>`;
+  const [w, h] = entry.size.split("x"), wrap = item.querySelector(".imgwrap"); wrap.style.aspectRatio = `${w}/${h}`;
+  const meta = item.querySelector(".meta"), img = item.querySelector("img"), waitEl = item.querySelector(".wait");
+  const updateMeta = () => { meta.textContent = `${entry.original || "(參考圖)"} · seed ${entry.seed}`; meta.title = entry.prompt; };
+  updateMeta();
+  const A = a => item.querySelector(`[data-a="${a}"]`);
+  const card = {
+    loading() { img.style.display = "none"; wrap.querySelector(".err")?.remove(); if (!wrap.querySelector(".spinner")) wrap.insertAdjacentHTML("afterbegin", '<div class="spinner"></div>'); },
+    wait(t) { waitEl.textContent = t; },
+    show(src) {
+      return new Promise(res => {
+        img.onload = () => { wrap.querySelector(".spinner")?.remove(); waitEl.textContent = ""; img.style.display = "block"; entry.loadedSrc = src; res(true); };
+        img.onerror = () => res(false);
+        img.src = src;
+      });
+    },
+    fail(msg) { wrap.querySelector(".spinner")?.remove(); waitEl.textContent = ""; wrap.insertAdjacentHTML("beforeend", `<span class="err">${msg}</span>`); }
+  };
+  entry.card = card;
+  img.onclick = () => { $("lightbox").querySelector("img").src = img.src; $("lightbox").style.display = "flex"; };
+  A("dl").onclick = () => {
+    if (!entry.blob) return window.open(img.src || entry.url, "_blank");
+    const a = document.createElement("a"); a.href = URL.createObjectURL(entry.blob); a.download = `ai-${entry.seed}.jpg`; a.click();
+  };
+  A("redo").onclick = () => { entry.seed = rand(); updateMeta(); enqueue(entry); };
+  A("del").onclick = () => { entry.cancelled = true; item.remove(); imgDel(entry.id); refreshEmpty(); };
+  A("seed").onclick = () => { $("seed").value = entry.seed; $("prompt").value = entry.original; setStatus(`已填入 Seed: ${entry.seed}`); };
+  A("fav").onclick = () => addSeedToFav(entry.seed, (entry.original || "").slice(0, 14) || `構圖 #${entry.seed}`, "常用", entry.styleValue || "");
+  A("copy").onclick = () => { navigator.clipboard.writeText(entry.prompt); setStatus("已複製描述"); };
+  A("layout").onclick = async () => {
+    if (!entry.blob && !entry.loadedSrc) return alert("圖片尚未生成完成");
+    showTab("editor");
+    const srcUrl = entry.blob ? await blobToDataURL(entry.blob) : (entry.loadedSrc || entry.url);
+    if (entry.ocrLines?.length && typeof Editor !== "undefined") {
+      const baseDataUrl = entry.rawBgBlob ? await blobToDataURL(entry.rawBgBlob) : srcUrl;
+      await Editor.cloneImageLayoutToCanvas({ width: +w, height: +h, lines: entry.ocrLines, cleanedDataUrl: baseDataUrl }, entry.customOcrText);
+    } else if (typeof Editor !== "undefined") {
+      Editor.addImage(srcUrl);
+    }
+  };
+  prepend ? $("gallery").prepend(item) : $("gallery").appendChild(item);
+  refreshEmpty(); return card;
+}
+
+const FALLBACK_MODELS = ["flux", "flux-realism", "turbo"];
+const queue = []; let running = false;
+function enqueue(entry) { entry.cancelled = false; entry.card.loading(); if (!queue.includes(entry)) queue.push(entry); runQueue(); }
+
+async function runQueue() {
+  if (running) return; running = true;
+  while (queue.length) {
+    const entry = queue[0]; let done = false;
+    for (let attempt = 0; attempt < FALLBACK_MODELS.length && !done && !entry.cancelled; attempt++) {
+      const currModel = FALLBACK_MODELS[attempt];
+      const until = (+localStorage.getItem(LAST_KEY) || 0) + (attempt === 0 ? COOLDOWN_MS : 4000);
+      while (Date.now() < until && !entry.cancelled) {
+        entry.card.wait(`排隊中 ${Math.ceil((until - Date.now()) / 1000)} 秒…`);
+        await sleep(400);
+      }
+      if (entry.cancelled) break;
+      entry.card.wait(attempt === 0 ? "繪圖中…" : `切換線路重試 (${currModel})…`);
+      setStatus("繪圖中…");
+      localStorage.setItem(LAST_KEY, Date.now());
+      entry.url = imageUrl(entry, currModel);
+
+      try {
+        const timeoutProm = new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 26000));
+        const res = await Promise.race([fetch(entry.url), timeoutProm]);
+        if (!res || !res.ok) throw new Error("HTTP error");
+        let blob = await res.blob();
+        if (blob.size < 1500) throw new Error("Empty");
+
+        blob = await removeCornerWatermark(blob);
+        entry.rawBgBlob = blob;
+
+        if (entry.ocrLines?.length) {
+          entry.card.wait("正在疊加文字…");
+          blob = await OCRLayoutEngine.compositeLayoutOntoImage(blob, entry.ocrLines, entry.customOcrText);
+        }
+        entry.blob = blob;
+        const { card, cancelled, ...plain } = entry;
+        await imgPut(plain);
+        await card.show(URL.createObjectURL(blob));
+        done = true;
+      } catch {
+        if (await entry.card.show(entry.url)) {
+          done = true;
+          const { card, cancelled, ...plain } = entry;
+          await imgPut(plain).catch(() => {});
+        } else {
+          await sleep(1500);
+        }
+      }
+    }
+    if (!done && !entry.cancelled) entry.card.fail("連線逾時，請點擊「重畫」");
+    queue.shift();
+  }
+  running = false; setStatus("完成");
+}
+
+$("generate").onclick = async () => {
+  const raw = $("prompt").value.trim();
+  if (!raw && !Ref.blob) { setStatus("請先輸入畫面描述或上傳參考圖"); $("prompt").focus(); return; }
+  $("generate").disabled = true;
+  try {
+    const wantsSameLayout = /排版|一樣|同款|文字/.test(raw) || $("refCloneLayoutChk")?.checked;
+    const prompt = await buildPrompt(raw);
+    const count = +$("count").value;
+    const baseSeed = $("seed").value === "" ? rand() : +$("seed").value;
+    const styleVal = $("style")?.value || "";
+
+    for (let i = 0; i < count; i++) {
+      const entry = {
+        id: Date.now() + "-" + i, original: raw, prompt, size: $("size").value,
+        seed: baseSeed + i, styleValue: styleVal, time: Date.now(),
+        ocrLines: (Ref.blob && wantsSameLayout && Ref.ocrLines?.length) ? JSON.parse(JSON.stringify(Ref.ocrLines)) : null,
+        customOcrText: $("refOcrText")?.value || ""
+      };
+      createCard(entry); enqueue(entry);
+    }
+  } catch (e) {
+    setStatus("錯誤：" + e.message);
+  } finally {
+    $("generate").disabled = false;
+  }
+};
+
+$("prompt").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("generate").click(); });
+$("clear").onclick = async () => {
+  if (!confirm("確定清除所有歷史圖片？")) return;
+  queue.forEach(e => e.cancelled = true);
+  await imgClear(); $("gallery").innerHTML = ""; refreshEmpty();
+};
+$("lightbox").onclick = () => { $("lightbox").style.display = "none"; };
+imgAll().then(list => {
+  list.sort((a, b) => b.time - a.time).forEach(e => {
+    const card = createCard(e, false);
+    card.show(e.blob ? URL.createObjectURL(e.blob) : e.url);
+  });
+  refreshEmpty();
+});
+</script>
+<!-- ==================== 請將第 2 部分貼在此行下方 ==================== -->
