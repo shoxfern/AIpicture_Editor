@@ -1245,4 +1245,1292 @@ imgAll().then(list => {
   refreshEmpty();
 });
 </script>
-<!-- ==================== 請將第 2 部分貼在此行下方 ==================== -->
+<script>
+/* =====================================================================
+   第 2 部分腳本：排版編輯器核心 + 手機觸控介面控制 + Firebase 雲端同步
+   ===================================================================== */
+const Editor = (() => {
+  let canvas, W = 1080, H = 1080, zoom = 1, ready = false;
+  let history = [], hIndex = -1, restoring = false, saveTimer = null;
+  let eyedropperMode = false, boxGrabMode = false, grabRect = null, startPt = null;
+  let touchPanMode = false;
+  const EXTRA = [
+    "name", "lockMovementX", "lockMovementY", "lockScalingX", "lockScalingY",
+    "lockRotation", "hasControls", "selectable", "evented", "_radiusPct",
+    "iconColor", "paintFill", "paintStroke", "globalCompositeOperation",
+    "isOnion", "isTexOverlay"
+  ];
+
+  function init() {
+    if (ready) return;
+    ready = true;
+    canvas = new fabric.Canvas("c", { preserveObjectStacking: true, backgroundColor: "#ffffff" });
+    fabric.Object.prototype.set({
+      transparentCorners: false, cornerColor: "#5865f2",
+      cornerStyle: "circle", borderColor: "#5865f2", cornerSize: window.innerWidth <= 860 ? 18 : 12
+    });
+    canvas.on("object:added", () => { queueSave(); refreshQuickTextList(); });
+    canvas.on("object:removed", () => { queueSave(); refreshQuickTextList(); });
+    canvas.on("object:modified", () => { queueSave(); refreshProps(); refreshQuickTextList(); });
+    canvas.on("text:changed", e => { ensureFont(e.target); queueSave(); refreshQuickTextList(); });
+    ["selection:created", "selection:updated", "selection:cleared"].forEach(ev => canvas.on(ev, refreshProps));
+    canvas.on("object:moving", e => snap(e.target));
+    canvas.on("mouse:up", () => { if (guides.length) { guides = []; canvas.requestRenderAll(); } });
+    canvas.on("after:render", drawGuides);
+    ["object:added", "object:removed", "object:modified", "selection:created", "selection:updated", "selection:cleared"].forEach(ev => canvas.on(ev, refreshLayers));
+    document.fonts.addEventListener("loadingdone", refreshFonts);
+    window.addEventListener("resize", () => { if (!$("tab-editor").classList.contains("hidden")) fit(); });
+    bindUI();
+    bindMobileAndCloud();
+    renderTemplates();
+    kvGet("project").then(p => {
+      if (p) loadProject(p, false);
+      else { setSize(1080, 1080, false); pushHistory(); }
+    }).catch(() => { setSize(1080, 1080, false); pushHistory(); });
+  }
+
+  /* ---- 尺寸與縮放 ---- */
+  function applyZoom() {
+    if (!canvas) return;
+    canvas.setZoom(zoom);
+    canvas.setDimensions({ width: Math.round(W * zoom), height: Math.round(H * zoom) });
+    $("edZoom").textContent = Math.round(zoom * 100) + "%";
+  }
+  function fit() {
+    if (!canvas) return;
+    const st = $("stage");
+    const pad = window.innerWidth <= 860 ? 20 : 48;
+    zoom = Math.min((st.clientWidth - pad) / W, (st.clientHeight - pad) / H);
+    zoom = Math.max(0.05, Math.min(zoom, 2));
+    applyZoom();
+  }
+  function setSize(w, h, doMagicResize = false) {
+    const oldW = W, oldH = H;
+    W = Math.max(50, Math.min(5000, +w || 1080));
+    H = Math.max(50, Math.min(5000, +h || 1080));
+    $("edW").value = W; $("edH").value = H;
+    if (canvas) {
+      const sx = W / oldW, sy = H / oldH, s = Math.min(sx, sy);
+      canvas.getObjects().forEach(o => {
+        if (o.isTexOverlay) {
+          o.set({ left: 0, top: 0, width: W, height: H, scaleX: 1, scaleY: 1, angle: 0, originX: "left", originY: "top" });
+          o.setCoords();
+        } else if (o.isOnion) {
+          o.set({ left: W / 2, top: H / 2, scaleX: W / o.width, scaleY: H / o.height });
+          o.setCoords();
+        } else if (doMagicResize && (oldW !== W || oldH !== H)) {
+          o.set({ left: o.left * sx, top: o.top * sy, scaleX: (o.scaleX || 1) * s, scaleY: (o.scaleY || 1) * s });
+          o.setCoords();
+        }
+      });
+    }
+    const opt = [...$("edPreset").options].find(o => o.value === `${W}x${H}`);
+    $("edPreset").value = opt ? opt.value : "custom";
+    fit();
+  }
+
+  function setProStatus(msg) { if ($("proOcrStatus")) $("proOcrStatus").textContent = msg; }
+
+  /* =====================================================================
+     原圖對照 + 全頁文字清單 + 中文排版轉換
+     ===================================================================== */
+  function setOnionSkinImage(dataUrl, opacity = 0) {
+    if (!canvas) return;
+    const old = canvas.getObjects().find(o => o.isOnion);
+    if (old) canvas.remove(old);
+    if (!dataUrl) return;
+    fabric.Image.fromURL(dataUrl, img => {
+      if (!img) return;
+      img.set({
+        left: W / 2, top: H / 2, originX: "center", originY: "center",
+        scaleX: W / img.width, scaleY: H / img.height,
+        opacity: opacity, selectable: false, evented: false, hasControls: false,
+        name: "原圖對照層", isOnion: true
+      });
+      canvas.add(img);
+      canvas.bringToFront(img);
+      $("onionSkinSlider").value = opacity;
+      canvas.requestRenderAll();
+    }, { crossOrigin: "anonymous" });
+  }
+
+  function updateOnionOpacity(val) {
+    if (!canvas) return;
+    const onion = canvas.getObjects().find(o => o.isOnion);
+    if (!onion) {
+      if (+val > 0) alert("請先點右側「換圖」或使用圖片文字擷取功能載入原圖");
+      $("onionSkinSlider").value = 0;
+      return;
+    }
+    onion.set({ opacity: +val, visible: +val > 0 });
+    if (+val > 0) canvas.bringToFront(onion);
+    canvas.requestRenderAll();
+  }
+
+  function refreshQuickTextList() {
+    const box = $("quickTextList");
+    if (!canvas || !box) return;
+    const texts = canvas.getObjects().filter(o => isText(o));
+    if (!texts.length) {
+      box.innerHTML = `<div class="tip">目前畫布無文字圖層</div>`;
+      return;
+    }
+    box.innerHTML = "";
+    texts.forEach(t => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:4px;align-items:center";
+      const inp = document.createElement("input");
+      inp.type = "text";
+      inp.value = (t.text || "").replace(/\n/g, " ");
+      inp.style.cssText = "flex:1;padding:5px 7px;font-size:12px;border-left:3px solid " + (typeof t.fill === "string" ? t.fill : "#5865f2");
+      inp.onfocus = () => { canvas.setActiveObject(t); canvas.requestRenderAll(); };
+      inp.oninput = () => {
+        t.set("text", inp.value);
+        if (t.initDimensions) t.initDimensions();
+        canvas.requestRenderAll(); queueSave();
+      };
+      const btn = document.createElement("button");
+      btn.textContent = "選取";
+      btn.style.cssText = "padding:4px 7px;font-size:11px;flex:none";
+      btn.onclick = () => { canvas.setActiveObject(t); canvas.requestRenderAll(); };
+      row.append(inp, btn);
+      box.appendChild(row);
+    });
+  }
+
+  async function cloneImageLayoutToCanvas(ocrRes, customLinesText = "") {
+    init();
+    if (!ocrRes || !ocrRes.width) return;
+    setProStatus("正在建立去字底圖與文字圖層…");
+    setSize(ocrRes.width, ocrRes.height, false);
+    const bgSrc = ocrRes.cleanedDataUrl || ocrRes.originalDataUrl;
+    await new Promise(res => {
+      fabric.Image.fromURL(bgSrc, img => {
+        if (img) {
+          img.set({
+            left: W / 2, top: H / 2, originX: "center", originY: "center",
+            scaleX: W / img.width, scaleY: H / img.height,
+            name: "去字底圖（已鎖定）",
+            selectable: false, evented: false, lockMovementX: true, lockMovementY: true, hasControls: false
+          });
+          canvas.add(img);
+        }
+        res();
+      }, { crossOrigin: "anonymous" });
+    });
+
+    const overrideArr = (customLinesText || "").split("\n").map(s => s.trim()).filter(Boolean);
+    let firstTb = null;
+    (ocrRes.lines || []).forEach((ln, idx) => {
+      const txt = overrideArr[idx] !== undefined ? overrideArr[idx] : ln.text;
+      if (!txt) return;
+      const fs = Math.max(14, Math.round(ln.relH * H * 0.88));
+      const leftPos = ln.align === "center" ? ln.relCenterX * W : ln.relX * W;
+      const tbObj = new fabric.Textbox(txt, {
+        left: leftPos,
+        top: ln.relCenterY * H,
+        width: Math.min(W * 0.95, Math.max(fs * txt.length * 1.08, ln.relW * W * 1.15)),
+        fontSize: fs,
+        fontFamily: ln.fontFamily || "Noto Sans TC",
+        fontWeight: ln.isBold ? "900" : "700",
+        fill: ln.fgColor || "#1e2d24",
+        textAlign: ln.align || "left",
+        originX: ln.align === "center" ? "center" : "left",
+        originY: "center",
+        lineHeight: 1.15,
+        splitByGrapheme: true
+      });
+      canvas.add(tbObj);
+      ensureFont(tbObj);
+      if (!firstTb) firstTb = tbObj;
+    });
+
+    if (ocrRes.originalDataUrl) setOnionSkinImage(ocrRes.originalDataUrl, 0);
+    if (firstTb) canvas.setActiveObject(firstTb);
+    canvas.requestRenderAll(); queueSave(); refreshLayers(); refreshQuickTextList();
+    setProStatus(`已建立 ${ocrRes.lines?.length || 0} 個文字層，底圖已鎖定`);
+  }
+
+  async function grabTextFromSelectedImage() {
+    let targetImg = act();
+    if (!isImage(targetImg)) targetImg = canvas.getObjects().find(o => isImage(o) && !o.isOnion);
+    if (!targetImg) return alert("畫布上沒有圖片可供擷取");
+    setProStatus("正在掃描圖片文字與座標…");
+    try {
+      const el = targetImg._originalElement || targetImg.getElement();
+      const cv = document.createElement("canvas");
+      cv.width = el.naturalWidth || el.width; cv.height = el.naturalHeight || el.height;
+      cv.getContext("2d").drawImage(el, 0, 0);
+      const origUrl = cv.toDataURL("image/jpeg", 0.95);
+      const res = await OCRLayoutEngine.analyze(origUrl, p => setProStatus(`辨識進度 ${(p * 100).toFixed(0)}%…`));
+      const bound = targetImg.getBoundingRect(true, true);
+      targetImg.setSrc(res.cleanedDataUrl, () => {
+        targetImg.set({ name: "去字底圖（已鎖定）", selectable: false, evented: false, lockMovementX: true, lockMovementY: true, hasControls: false });
+        canvas.discardActiveObject();
+        let firstTb = null;
+        res.lines.forEach(ln => {
+          const fs = Math.max(14, Math.round(ln.relH * bound.height * 0.88));
+          const leftPos = ln.align === "center" ? bound.left + ln.relCenterX * bound.width : bound.left + ln.relX * bound.width;
+          const tbObj = new fabric.Textbox(ln.text, {
+            left: leftPos, top: bound.top + ln.relCenterY * bound.height,
+            width: Math.max(fs * ln.text.length * 1.08, ln.relW * bound.width * 1.15),
+            fontSize: fs, fontFamily: ln.fontFamily || "Noto Sans TC", fontWeight: ln.isBold ? "900" : "700",
+            fill: ln.fgColor || "#1e2d24", textAlign: ln.align || "left",
+            originX: ln.align === "center" ? "center" : "left", originY: "center", splitByGrapheme: true
+          });
+          canvas.add(tbObj); ensureFont(tbObj);
+          if (!firstTb) firstTb = tbObj;
+        });
+        setOnionSkinImage(origUrl, 0);
+        if (firstTb) canvas.setActiveObject(firstTb);
+        canvas.requestRenderAll(); queueSave(); refreshLayers(); refreshQuickTextList();
+        setProStatus(`已擷取 ${res.lines.length} 個文字區塊`);
+      });
+    } catch (e) { setProStatus("擷取失敗：" + e.message); }
+  }
+
+  async function syncImageToActiveText(fileOrBlob) {
+    if (!fileOrBlob) return;
+    const targetText = isText(act()) ? act() : null;
+    setProStatus("正在讀取圖片文字…");
+    try {
+      const res = await OCRLayoutEngine.analyze(fileOrBlob, p => setProStatus(`讀取進度 ${(p * 100).toFixed(0)}%…`));
+      if (!res.lines.length) return addFiles([fileOrBlob]);
+      if (targetText) {
+        if (confirm(`讀取到文字：「${res.lines.map(l => l.text).join(" / ").slice(0, 50)}」\n按【確定】套用到目前選取的文字框；按【取消】將整張圖轉為文字排版層`)) {
+          const mainLine = [...res.lines].sort((a, b) => b.height - a.height)[0];
+          const newFs = Math.max(18, Math.min(260, Math.round(mainLine.relH * H * 0.85)));
+          targetText.set({
+            text: res.lines.map(l => l.text).join("\n"),
+            fill: mainLine.fgColor || "#222222", fontSize: newFs,
+            fontFamily: mainLine.fontFamily || "Noto Sans TC",
+            fontWeight: mainLine.isBold ? "900" : "700", textAlign: mainLine.align || "center"
+          });
+          if (targetText.initDimensions) targetText.initDimensions();
+          targetText.setCoords(); canvas.requestRenderAll(); queueSave(); refreshProps(); refreshQuickTextList();
+          setProStatus("已套用圖片文字與樣式");
+          return;
+        }
+      }
+      await cloneImageLayoutToCanvas(res);
+    } catch (e) { setProStatus("讀取失敗：" + e.message); }
+  }
+
+  /* =====================================================================
+     版面元件、外框、邊緣羽化與紙張底紋
+     ===================================================================== */
+  function featherSelectedImage() {
+    const o = act();
+    if (!isImage(o)) return alert("請先點選一張圖片");
+    const el = o._originalElement || o.getElement();
+    const w = el.naturalWidth || el.width, h = el.naturalHeight || el.height;
+    const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+    const ctx = cv.getContext("2d");
+    ctx.drawImage(el, 0, 0, w, h);
+    ctx.globalCompositeOperation = "destination-in";
+    const r = Math.min(w, h) * 0.5;
+    const grad = ctx.createRadialGradient(w / 2, h / 2, r * 0.55, w / 2, h / 2, r * 0.98);
+    grad.addColorStop(0, "rgba(0,0,0,1)");
+    grad.addColorStop(0.75, "rgba(0,0,0,0.92)");
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    o.setSrc(cv.toDataURL("image/png"), () => { canvas.requestRenderAll(); queueSave(); });
+  }
+
+  function addSmartBoundTag(kind) {
+    const s = Math.min(W, H);
+    if (kind === "person" || kind === "element") {
+      const isP = kind === "person";
+      const circle = new fabric.Circle({ left: W * 0.65, top: H * 0.4, radius: s * 0.048, fill: "transparent", stroke: "#1e2d24", strokeWidth: 3, originX: "center", originY: "center" });
+      const iconTxt = new fabric.Text(isP ? "👤" : "🏛️", { left: W * 0.65, top: H * 0.4, fontSize: Math.round(s * 0.048), originX: "center", originY: "center" });
+      const labelTb = new fabric.Textbox(isP ? "人物\n保羅×1" : "元素\n道路×1、\n信心×1", {
+        left: W * 0.65 + s * 0.065, top: H * 0.4, width: s * 0.25, fontSize: Math.round(s * 0.032),
+        fontFamily: "Noto Sans TC", fontWeight: "900", fill: "#1e2d24", lineHeight: 1.25,
+        originX: "left", originY: "center", splitByGrapheme: true
+      });
+      canvas.add(circle, iconTxt, labelTb);
+      canvas.setActiveObject(labelTb); canvas.requestRenderAll(); queueSave();
+    } else if (kind === "bible") {
+      const bg = new fabric.Rect({ left: W / 2, top: H * 0.78, width: s * 0.42, height: s * 0.068, rx: 14, ry: 14, fill: "#1e2d24", originX: "center", originY: "center" });
+      const tb = new fabric.Textbox("📖 使徒行傳 17:16-34", {
+        left: W / 2, top: H * 0.78, width: s * 0.4, fontSize: Math.round(s * 0.026),
+        fontFamily: "Noto Sans TC", fontWeight: "700", fill: "#f4ecd8", textAlign: "center",
+        originX: "center", originY: "center", splitByGrapheme: true
+      });
+      canvas.add(bg, tb); canvas.setActiveObject(tb); canvas.requestRenderAll(); queueSave();
+    } else if (kind === "score") {
+      const c1 = new fabric.Circle({ left: W / 2, top: H * 0.88, radius: s * 0.085, fill: "#f4ecd8", stroke: "#1e2d24", strokeWidth: 5, originX: "center", originY: "center" });
+      const c2 = new fabric.Circle({ left: W / 2, top: H * 0.88, radius: s * 0.074, fill: "transparent", stroke: "#1e2d24", strokeWidth: 2, originX: "center", originY: "center" });
+      const tb = new fabric.Textbox("2分", {
+        left: W / 2, top: H * 0.88, width: s * 0.14, fontSize: Math.round(s * 0.062),
+        fontFamily: "Noto Sans TC", fontWeight: "900", fill: "#1e2d24", textAlign: "center",
+        originX: "center", originY: "center", splitByGrapheme: true
+      });
+      canvas.add(c1, c2, tb); canvas.setActiveObject(tb); canvas.requestRenderAll(); queueSave();
+    }
+  }
+
+  function addOrnateFrameOrBanner(kind) {
+    const s = Math.min(W, H), pad = Math.round(s * 0.035);
+    if (kind === "vintageBorder") {
+      const r1 = new fabric.Rect({ left: pad, top: pad, width: W - pad * 2, height: H - pad * 2, fill: "transparent", stroke: "#1e2d24", strokeWidth: 8, rx: 12, ry: 12, selectable: false, evented: false, name: "雙線外框" });
+      const r2 = new fabric.Rect({ left: pad + 14, top: pad + 14, width: W - (pad + 14) * 2, height: H - (pad + 14) * 2, fill: "transparent", stroke: "#1e2d24", strokeWidth: 2, rx: 8, ry: 8, selectable: false, evented: false, name: "雙線內框" });
+      canvas.add(r1, r2); canvas.requestRenderAll(); queueSave();
+    } else if (kind === "scrollBanner") {
+      const bg = new fabric.Rect({ left: W / 2, top: H * 0.6, width: W * 0.78, height: s * 0.13, rx: 18, ry: 18, fill: "#efe3c2", stroke: "#6b4c2b", strokeWidth: 4, shadow: new fabric.Shadow({ color: "rgba(0,0,0,0.28)", blur: 14, offsetX: 0, offsetY: 6 }), originX: "center", originY: "center" });
+      const tb = new fabric.Textbox("保羅在雅典講道", { left: W / 2, top: H * 0.6, width: W * 0.72, fontSize: Math.round(s * 0.068), fontFamily: "Noto Serif TC", fontWeight: "900", fill: "#2a180c", textAlign: "center", originX: "center", originY: "center", splitByGrapheme: true });
+      canvas.add(bg, tb); canvas.setActiveObject(tb); canvas.requestRenderAll(); queueSave();
+    } else if (kind === "darkBadge") {
+      const poly = new fabric.Polygon([{ x: 0, y: 0 }, { x: s * 0.36, y: 0 }, { x: s * 0.32, y: s * 0.05 }, { x: s * 0.36, y: s * 0.1 }, { x: 0, y: s * 0.1 }], { left: pad + 20, top: pad + 18, fill: "#1e2d24" });
+      const tb = new fabric.Textbox("事件卡", { left: pad + 35, top: pad + 18 + s * 0.05, width: s * 0.3, fontSize: Math.round(s * 0.042), fontFamily: "Noto Sans TC", fontWeight: "900", fill: "#f4ecd8", originX: "left", originY: "center", splitByGrapheme: true });
+      canvas.add(poly, tb); canvas.setActiveObject(tb); canvas.requestRenderAll(); queueSave();
+    }
+  }
+
+  function toggleParchmentTexture() {
+    let old = canvas.getObjects().find(o => o.isTexOverlay);
+    if (old) { canvas.remove(old); canvas.requestRenderAll(); queueSave(); refreshLayers(); return; }
+    const pc = document.createElement("canvas"); pc.width = pc.height = 160;
+    const ctx = pc.getContext("2d");
+    ctx.fillStyle = "rgba(212, 185, 138, 0.22)"; ctx.fillRect(0, 0, 160, 160);
+    for (let i = 0; i < 900; i++) {
+      ctx.fillStyle = i % 2 ? "rgba(120, 85, 40, 0.06)" : "rgba(255, 248, 225, 0.08)";
+      ctx.fillRect(Math.random() * 160, Math.random() * 160, Math.random() * 6 + 1, Math.random() * 6 + 1);
+    }
+    const r = new fabric.Rect({
+      left: 0, top: 0, width: W, height: H, fill: new fabric.Pattern({ source: pc, repeat: "repeat" }),
+      selectable: false, evented: false, isTexOverlay: true, name: "羊皮紙紋理層",
+      globalCompositeOperation: "multiply", lockMovementX: true, lockMovementY: true, hasControls: false
+    });
+    canvas.add(r); canvas.bringToFront(r);
+    canvas.requestRenderAll(); queueSave(); refreshLayers();
+  }
+
+  /* =====================================================================
+     A4 拼版列印 PDF + 主角背景分離 + 局部塗抹消除
+     ===================================================================== */
+  async function exportA4PrintSheetPDF() {
+    const btn = $("exportA4SheetBtn"), oldTxt = btn.textContent;
+    snapshot(); btn.disabled = true; btn.textContent = "處理中…";
+    try {
+      await loadScript("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js");
+      await Promise.all(pages.map(preloadFonts));
+      const mode = $("printGridMode").value;
+      const [cols, rows] = mode.split("x").map(Number);
+      const perSheet = cols * rows;
+      const pdf = new window.jspdf.jsPDF({ orientation: "p", unit: "mm", format: "a4", compress: true });
+      const pageW = 210, pageH = 297, marginX = 10, marginY = 12, gap = 2;
+      const cellW = (pageW - marginX * 2 - gap * (cols - 1)) / cols;
+      const cellH = (pageH - marginY * 2 - gap * (rows - 1)) / rows;
+
+      const totalCards = pages.length === 1 ? perSheet : pages.length;
+      for (let i = 0; i < totalCards; i++) {
+        const slot = i % perSheet;
+        if (i > 0 && slot === 0) pdf.addPage("a4", "p");
+        const c = slot % cols, r = Math.floor(slot / cols);
+        const x = marginX + c * (cellW + gap), y = marginY + r * (cellH + gap);
+        const srcPage = pages[pages.length === 1 ? 0 : i];
+        const imgUrl = await renderJSON(srcPage, 2, { format: "jpeg", quality: 0.94 });
+        pdf.addImage(imgUrl, "JPEG", x, y, cellW, cellH);
+
+        pdf.setDrawColor(120, 120, 120); pdf.setLineWidth(0.2);
+        const mLen = 3;
+        [[x, y], [x + cellW, y], [x, y + cellH], [x + cellW, y + cellH]].forEach(([cx, cy]) => {
+          pdf.line(cx - mLen, cy, cx + mLen, cy);
+          pdf.line(cx, cy - mLen, cx, cy + mLen);
+        });
+      }
+      pdf.save(`A4-print-${mode}-${Date.now()}.pdf`);
+    } catch (e) { alert("匯出失敗：" + e.message); }
+    finally { btn.disabled = false; btn.textContent = oldTxt; }
+  }
+
+  async function magicGrabSubject() {
+    const o = act(); if (!isImage(o)) return alert("請先點選一張圖片");
+    try {
+      const { T, model, processor } = await loadBgModel();
+      const el = o._originalElement || o.getElement(), w = el.naturalWidth || el.width, h = el.naturalHeight || el.height;
+      const bgCv = document.createElement("canvas"); bgCv.width = w; bgCv.height = h;
+      const bgCtx = bgCv.getContext("2d"); bgCtx.filter = "blur(18px) brightness(0.98)"; bgCtx.drawImage(el, -20, -20, w + 40, h + 40);
+      const fgCv = document.createElement("canvas"); fgCv.width = w; fgCv.height = h;
+      const fgCtx = fgCv.getContext("2d"); fgCtx.drawImage(el, 0, 0, w, h);
+      const image = await T.RawImage.fromCanvas(fgCv), { pixel_values } = await processor(image.rgb()), { output } = await model({ input: pixel_values });
+      const mask = await T.RawImage.fromTensor(output[0].mul(255).to("uint8")).resize(w, h), d = fgCtx.getImageData(0, 0, w, h);
+      for (let i = 0; i < w * h; i++) d.data[i * 4 + 3] = Math.min(d.data[i * 4 + 3], mask.data[i]);
+      fgCtx.putImageData(d, 0, 0);
+      const props = { left: o.left, top: o.top, scaleX: o.scaleX, scaleY: o.scaleY, angle: o.angle, originX: o.originX, originY: o.originY };
+      o.setSrc(bgCv.toDataURL("image/jpeg", 0.9), () => {
+        o.set({ ...props, name: "背景層" });
+        fabric.Image.fromURL(fgCv.toDataURL("image/png"), fgImg => {
+          fgImg.set({ ...props, left: props.left + 25, top: props.top - 15, name: "主角層", shadow: new fabric.Shadow({ color: "rgba(0,0,0,0.35)", blur: 20, offsetX: 8, offsetY: 8 }) });
+          canvas.add(fgImg); canvas.setActiveObject(fgImg); canvas.requestRenderAll(); queueSave(); refreshLayers();
+        });
+      });
+    } catch (e) { alert("處理失敗：" + e.message); }
+  }
+
+  let eraserTarget = null, eraserBaseImg = null, eraserDrawing = false;
+  function openMagicEraser() {
+    const o = act(); if (!isImage(o)) return alert("請先點選一張圖片");
+    eraserTarget = o;
+    const el = o._originalElement || o.getElement(), w = el.naturalWidth || el.width, h = el.naturalHeight || el.height;
+    const ec = $("eraserCanvas"); ec.width = w; ec.height = h; ec.style.maxWidth = "80vw"; ec.style.maxHeight = "60vh";
+    const ctx = ec.getContext("2d"); ctx.drawImage(el, 0, 0, w, h);
+    eraserBaseImg = ctx.getImageData(0, 0, w, h);
+    $("eraserModal").style.display = "flex";
+    const getPos = e => {
+      const r = ec.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return { x: (clientX - r.left) * (w / r.width), y: (clientY - r.top) * (h / r.height) };
+    };
+    const startDraw = e => {
+      eraserDrawing = true; const p = getPos(e);
+      ctx.strokeStyle = "rgba(255,0,85,0.65)"; ctx.lineWidth = +$("eraserSize").value * (w / 800);
+      ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.beginPath(); ctx.moveTo(p.x, p.y);
+    };
+    const moveDraw = e => { if (!eraserDrawing) return; e.preventDefault(); const p = getPos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); };
+    ec.onmousedown = startDraw; ec.onmousemove = moveDraw; ec.onmouseup = ec.onmouseleave = () => { eraserDrawing = false; };
+    ec.ontouchstart = startDraw; ec.ontouchmove = moveDraw; ec.ontouchend = () => { eraserDrawing = false; };
+  }
+  function applyMagicEraser() {
+    if (!eraserTarget || !eraserBaseImg) return;
+    const ec = $("eraserCanvas"), w = ec.width, h = ec.height, ctx = ec.getContext("2d");
+    const painted = ctx.getImageData(0, 0, w, h).data, outImg = new ImageData(new Uint8ClampedArray(eraserBaseImg.data), w, h), d = outImg.data, mask = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) { const idx = i * 4; if (painted[idx] - eraserBaseImg.data[idx] > 40 || Math.abs(painted[idx + 1] - eraserBaseImg.data[idx + 1]) > 35) mask[i] = 1; }
+    for (let pass = 0; pass < 35; pass++) for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x; if (!mask[i]) continue;
+      let r = 0, g = 0, b = 0, cnt = 0;
+      for (const n of [i - 1, i + 1, i - w, i + w, i - w - 1, i - w + 1, i + w - 1, i + w + 1]) if (!mask[n]) { r += d[n * 4]; g += d[n * 4 + 1]; b += d[n * 4 + 2]; cnt++; }
+      if (cnt > 0) { d[i * 4] = r / cnt; d[i * 4 + 1] = g / cnt; d[i * 4 + 2] = b / cnt; if (pass % 2 === 1) mask[i] = 0; }
+    }
+    ctx.putImageData(outImg, 0, 0);
+    eraserTarget.setSrc(ec.toDataURL("image/jpeg", 0.94), () => { canvas.requestRenderAll(); queueSave(); $("eraserModal").style.display = "none"; });
+  }
+
+  /* ---- 新增基本物件 ---- */
+  function center(obj) { obj.set({ left: W / 2, top: H / 2, originX: "center", originY: "center" }); return obj; }
+  function addObj(obj) { canvas.add(obj); canvas.setActiveObject(obj); canvas.requestRenderAll(); }
+  function addText(kind) {
+    const base = Math.min(W, H);
+    const cfg = {
+      title: { text: "標題文字", size: base * 0.085, weight: "900" },
+      subtitle: { text: "副標題文字", size: base * 0.05, weight: "700" },
+      body: { text: "內文段落", size: base * 0.032, weight: "400" }
+    }[kind];
+    const t = new fabric.Textbox(cfg.text, { width: W * (kind === "body" ? 0.65 : 0.8), fontSize: Math.round(cfg.size), fontWeight: cfg.weight, fontFamily: "Noto Sans TC", fill: "#222222", textAlign: "center", lineHeight: 1.25, splitByGrapheme: true });
+    addObj(center(t)); ensureFont(t);
+  }
+  function addShape(kind) {
+    const s = Math.min(W, H) * 0.28, fill = "#5865f2"; let o;
+    if (kind === "rect") o = new fabric.Rect({ width: s * 1.4, height: s, fill });
+    if (kind === "round") o = new fabric.Rect({ width: s * 1.4, height: s, fill, rx: s * 0.15, ry: s * 0.15 });
+    if (kind === "circle") o = new fabric.Circle({ radius: s / 2, fill });
+    if (kind === "line") o = new fabric.Line([0, 0, s * 1.5, 0], { stroke: "#222222", strokeWidth: Math.max(4, s * 0.03) });
+    if (o) addObj(center(o));
+  }
+  function addImage(src) {
+    init();
+    fabric.Image.fromURL(src, img => {
+      if (!img || !img.width) return alert("圖片載入失敗");
+      const s = Math.min((W * 0.7) / img.width, (H * 0.7) / img.height, 1);
+      img.set({ scaleX: s, scaleY: s }); addObj(center(img));
+    }, { crossOrigin: "anonymous" });
+  }
+  async function addFiles(files) { for (const f of files) if (f.type?.startsWith("image/")) addImage(await shrink(await blobToDataURL(f))); }
+  async function refreshAiThumbs() {
+    const list = (await imgAll()).filter(e => e.blob || e.url).sort((a, b) => b.time - a.time);
+    const box = $("aiThumbs"); box.innerHTML = "";
+    $("aiThumbsEmpty").classList.toggle("hidden", list.length > 0);
+    list.forEach(e => {
+      const im = document.createElement("img");
+      im.src = e.blob ? URL.createObjectURL(e.blob) : e.url;
+      im.title = e.original || e.prompt;
+      im.onclick = async () => addImage(e.blob ? await blobToDataURL(e.blob) : e.url);
+      box.appendChild(im);
+    });
+  }
+
+  /* ---- 多頁 / 復原 / 重做 / 自動儲存 ---- */
+  let pages = [null], cur = 0, thumbs = [];
+  const blankPage = () => ({ version: fabric.version, objects: [], background: "#ffffff" });
+  function snapshot() {
+    if (!canvas) return { W, H, pages, cur };
+    const onions = canvas.getObjects().filter(o => o.isOnion);
+    onions.forEach(o => canvas.remove(o));
+    pages[cur] = canvas.toJSON(EXTRA);
+    onions.forEach(o => { canvas.add(o); canvas.bringToFront(o); });
+    return { W, H, pages, cur };
+  }
+  function normalize(p) {
+    if (!p.pages) p = { W: p.W, H: p.H, pages: [p.json || blankPage()], cur: 0 };
+    p.cur = Math.max(0, Math.min(p.cur || 0, p.pages.length - 1)); return p;
+  }
+  function pushHistory() {
+    const snap = JSON.stringify(snapshot()); updateThumb();
+    if (history[hIndex] === snap) return;
+    history = history.slice(0, hIndex + 1); history.push(snap);
+    if (history.length > 40) history.shift();
+    hIndex = history.length - 1;
+    kvSet("project", snap).catch(() => {}); updateUndo();
+  }
+  function queueSave() { if (restoring) return; clearTimeout(saveTimer); saveTimer = setTimeout(pushHistory, 250); }
+  function updateUndo() { $("edUndo").disabled = hIndex <= 0; $("edRedo").disabled = hIndex >= history.length - 1; }
+  function loadPageJSON(json, done) {
+    restoring = true; guides = []; canvas.discardActiveObject();
+    canvas.loadFromJSON(json, () => {
+      canvas.renderAll(); restoring = false;
+      $("pBg").value = toHex(canvas.backgroundColor) || "#ffffff";
+      refreshProps(); refreshLayers(); refreshQuickTextList();
+      canvas.getObjects().forEach(ensureFont);
+      if (done) done();
+    });
+  }
+  function applyState(p, done) {
+    p = normalize(p); pages = p.pages; cur = p.cur; thumbs = [];
+    setSize(p.W, p.H, false);
+    loadPageJSON(pages[cur], () => { if (done) done(); renderAllThumbs(); });
+  }
+  function loadProject(data, record = true) {
+    applyState(typeof data === "string" ? JSON.parse(data) : data, () => {
+      if (record) pushHistory(); else { history = [JSON.stringify(snapshot())]; hIndex = 0; updateUndo(); }
+    });
+  }
+  function undo() { if (hIndex > 0) { hIndex--; restore(); } }
+  function redo() { if (hIndex < history.length - 1) { hIndex++; restore(); } }
+  function restore() { applyState(JSON.parse(history[hIndex]), () => { updateUndo(); kvSet("project", history[hIndex]).catch(() => {}); }); }
+
+  const THUMB = 160;
+  function updateThumb() {
+    if (!canvas) return;
+    try { thumbs[cur] = canvas.toDataURL({ format: "jpeg", quality: 0.7, multiplier: THUMB / (Math.max(W, H) * zoom) }); } catch {}
+    renderPages();
+  }
+  async function renderAllThumbs() {
+    for (let i = 0; i < pages.length; i++) if (i !== cur && pages[i]) thumbs[i] = await renderJSON(pages[i], THUMB / Math.max(W, H), { format: "jpeg", quality: 0.7 });
+    updateThumb();
+  }
+  function renderPages() {
+    const box = $("pageList"); box.innerHTML = "";
+    pages.forEach((_, i) => {
+      const d = document.createElement("div"); d.className = "pg" + (i === cur ? " on" : ""); d.style.width = Math.round(44 * W / H) + "px";
+      if (thumbs[i]) { const im = document.createElement("img"); im.src = thumbs[i]; d.appendChild(im); }
+      const n = document.createElement("span"); n.textContent = i + 1; d.appendChild(n);
+      d.onclick = () => switchPage(i); box.appendChild(d);
+    });
+    $("pgInfo").textContent = `${cur + 1} / ${pages.length} 頁`;
+    $("pgDel").disabled = pages.length < 2; $("pgLeft").disabled = cur === 0; $("pgRight").disabled = cur === pages.length - 1;
+  }
+  function switchPage(i) { if (i === cur || i < 0 || i >= pages.length) return; snapshot(); updateThumb(); cur = i; loadPageJSON(pages[i], pushHistory); }
+  function addPage(copy) { snapshot(); updateThumb(); pages.splice(cur + 1, 0, copy ? JSON.parse(JSON.stringify(pages[cur])) : blankPage()); thumbs.splice(cur + 1, 0, copy ? thumbs[cur] : null); cur++; loadPageJSON(pages[cur], pushHistory); }
+  function deletePage() { if (pages.length < 2 || !confirm(`刪除第 ${cur + 1} 頁？`)) return; pages.splice(cur, 1); thumbs.splice(cur, 1); cur = Math.min(cur, pages.length - 1); loadPageJSON(pages[cur], pushHistory); }
+  function movePage(d) { const j = cur + d; if (j < 0 || j >= pages.length) return; snapshot(); [pages[cur], pages[j]] = [pages[j], pages[cur]]; [thumbs[cur], thumbs[j]] = [thumbs[j], thumbs[cur]]; cur = j; pushHistory(); }
+
+  /* ---- 屬性面板 ---- */
+  const act = () => canvas.getActiveObject();
+  const isText = o => o && (o.type === "textbox" || o.type === "i-text" || o.type === "text");
+  const isImage = o => o && o.type === "image";
+  const isShape = o => !!o && ["rect", "circle", "ellipse", "triangle", "polygon", "line", "path"].includes(o.type);
+  function toHex(c) {
+    if (!c || typeof c !== "string") return null;
+    if (c.startsWith("#")) return c.length === 4 ? "#" + [...c.slice(1)].map(x => x + x).join("") : c.slice(0, 7);
+    const m = c.match(/\d+/g); return m ? "#" + m.slice(0, 3).map(n => (+n).toString(16).padStart(2, "0")).join("") : null;
+  }
+  const ALIGNS = [["left", "靠左"], ["center", "置中"], ["right", "靠右"]];
+  function refreshProps() {
+    const o = act();
+    $("pCanvas").classList.toggle("hidden", !!o);
+    $("pCommon").classList.toggle("hidden", !o);
+    $("pText").classList.toggle("hidden", !isText(o));
+    $("pShape").classList.toggle("hidden", !isShape(o));
+    $("pImage").classList.toggle("hidden", !isImage(o));
+    const multi = o?.type === "activeSelection", grp = o?.type === "group";
+    $("pMulti").classList.toggle("hidden", !(multi || grp));
+    $("pGroup").classList.toggle("hidden", !multi); $("pUngroup").classList.toggle("hidden", !grp);
+    if (!o) return;
+    $("pOpacity").value = o.opacity ?? 1;
+    $("pLock").textContent = o.lockMovementX ? "解鎖" : "鎖定";
+    if (isText(o)) {
+      $("pFont").value = o.fontFamily; $("pFontSize").value = Math.round(o.fontSize);
+      $("pTextColor").value = toHex(o.fill) || "#000000";
+      $("pBold").classList.toggle("on", o.fontWeight === "bold" || +o.fontWeight >= 700);
+      $("pItalic").classList.toggle("on", o.fontStyle === "italic");
+      $("pAlign").textContent = (ALIGNS.find(a => a[0] === o.textAlign) || ALIGNS[0])[1];
+      $("pLine").value = o.lineHeight; $("pSpacing").value = o.charSpacing || 0;
+      $("pTextStroke").value = toHex(o.stroke) || "#000000"; $("pTextStrokeW").value = o.stroke ? o.strokeWidth : 0;
+      $("pTextBg").value = toHex(o.backgroundColor) || "#ffffff";
+    }
+    if (isShape(o)) {
+      $("pFill").value = toHex(o.fill) || "#ffffff";
+      $("pStroke").value = toHex(o.stroke) || "#000000"; $("pStrokeW").value = o.strokeWidth || 0;
+      $("pRadiusRow").classList.toggle("hidden", o.type !== "rect");
+      if (o.type === "rect") $("pRadius").value = o.rx || 0;
+    }
+    if (isImage(o)) {
+      const f = name => (o.filters || []).find(x => x.type === name);
+      $("pBright").value = f("Brightness")?.brightness || 0;
+      $("pContrast").value = f("Contrast")?.contrast || 0;
+      $("pSat").value = f("Saturation")?.saturation || 0;
+      $("pImgRadius").value = o._radiusPct || 0;
+    }
+  }
+  function setProp(props) {
+    const o = act(); if (!o) return;
+    (o.type === "activeSelection" ? o.getObjects() : [o]).forEach(t => t.set(props));
+    o.setCoords(); canvas.requestRenderAll(); queueSave();
+  }
+  function setTextProp(props) {
+    const o = act(); if (!isText(o)) return;
+    o.set(props); if (o.initDimensions) o.initDimensions();
+    o.setCoords(); canvas.requestRenderAll(); queueSave();
+  }
+  function applyImageFilters() {
+    const o = act(); if (!isImage(o)) return;
+    const F = fabric.Image.filters, fl = [];
+    const b = +$("pBright").value, c = +$("pContrast").value, s = +$("pSat").value;
+    if (b) fl.push(new F.Brightness({ brightness: b }));
+    if (c) fl.push(new F.Contrast({ contrast: c }));
+    if (s) fl.push(new F.Saturation({ saturation: s }));
+    o.filters = fl; o.applyFilters(); canvas.requestRenderAll(); queueSave();
+  }
+  function alignTo(where) {
+    const o = act(); if (!o) return;
+    const r = o.getBoundingRect(true, true);
+    const dx = { left: -r.left, hcenter: W / 2 - (r.left + r.width / 2), right: W - (r.left + r.width) }[where] || 0;
+    const dy = { top: -r.top, vcenter: H / 2 - (r.top + r.height / 2), bottom: H - (r.top + r.height) }[where] || 0;
+    o.set({ left: o.left + dx, top: o.top + dy }); o.setCoords(); canvas.requestRenderAll(); queueSave();
+  }
+  function removeActive() {
+    const o = act(); if (!o) return;
+    (o.type === "activeSelection" ? o.getObjects() : [o]).forEach(x => canvas.remove(x));
+    canvas.discardActiveObject(); canvas.requestRenderAll();
+  }
+  function toggleLock() {
+    const o = act(); if (!o) return;
+    const lock = !o.lockMovementX;
+    o.set({ lockMovementX: lock, lockMovementY: lock, lockScalingX: lock, lockScalingY: lock, lockRotation: lock, hasControls: !lock, selectable: true, evented: true });
+    canvas.requestRenderAll(); refreshProps(); queueSave();
+  }
+  function coverCanvas() {
+    const o = act(); if (!isImage(o)) return;
+    const s = Math.max(W / o.width, H / o.height);
+    o.set({ scaleX: s, scaleY: s, angle: 0, left: W / 2, top: H / 2, originX: "center", originY: "center" });
+    o.setCoords(); canvas.sendToBack(o); canvas.requestRenderAll(); queueSave();
+  }
+  async function ensureFont(o) {
+    if (!isText(o)) return;
+    try { await document.fonts.load(`${o.fontStyle || "normal"} ${o.fontWeight || 400} 40px "${o.fontFamily}"`, o.text || "字A"); } catch {}
+    refreshFonts();
+  }
+  function refreshFonts() {
+    if (!canvas) return;
+    fabric.util.clearFabricFontCache();
+    canvas.getObjects().forEach(x => { if (isText(x)) { x.initDimensions(); x.setCoords(); x.dirty = true; } });
+    canvas.requestRenderAll();
+  }
+  function setFont(name) { setTextProp({ fontFamily: name }); ensureFont(act()); }
+
+  function textEffect(fx) {
+    const o = act(); if (!isText(o)) return;
+    const fs = o.fontSize, col = typeof o.fill === "string" ? o.fill : "#222222";
+    const S = (c, b, x, y) => new fabric.Shadow({ color: c, blur: b, offsetX: x, offsetY: y });
+    const base = { shadow: null, stroke: null, strokeWidth: 0, backgroundColor: "", fill: col, paintFirst: "fill" };
+    if (fx === "shadow") setTextProp({ ...base, shadow: S("rgba(0,0,0,0.45)", fs * 0.15, fs * 0.05, fs * 0.05) });
+    else if (fx === "outline") setTextProp({ ...base, stroke: "#ffffff", strokeWidth: fs * 0.08, paintFirst: "stroke" });
+    else if (fx === "gold") setTextProp({ ...base, fill: "#d4a373", stroke: "#2a180c", strokeWidth: fs * 0.05, paintFirst: "stroke", shadow: S("rgba(0,0,0,0.4)", 8, 2, 3) });
+    else setTextProp(base);
+    refreshProps();
+  }
+
+  function setImageRadius(pct) {
+    const o = act(); if (!isImage(o)) return;
+    o._radiusPct = pct;
+    if (pct > 0) {
+      const r = Math.min(o.width, o.height) * pct / 100;
+      o.clipPath = new fabric.Rect({ width: o.width, height: o.height, rx: r, ry: r, originX: "center", originY: "center", left: 0, top: 0 });
+    } else o.clipPath = null;
+    o.dirty = true; canvas.requestRenderAll(); queueSave();
+  }
+
+  const TF_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1";
+  let bgModel = null;
+  function loadBgModel() {
+    if (!bgModel) bgModel = (async () => {
+      const T = await import(TF_URL), id = "briaai/RMBG-1.4";
+      const model = await T.AutoModel.from_pretrained(id, { config: { model_type: "custom" }, dtype: "q8", device: "wasm" });
+      const processor = await T.AutoProcessor.from_pretrained(id, { config: { do_normalize: true, do_pad: false, do_rescale: true, do_resize: true, image_mean: [0.5, 0.5, 0.5], feature_extractor_type: "ImageFeatureExtractor", image_std: [1, 1, 1], resample: 2, rescale_factor: 0.00392156862745098, size: { width: 1024, height: 1024 } } });
+      return { T, model, processor };
+    })().catch(e => { bgModel = null; throw e; });
+    return bgModel;
+  }
+  async function removeBg() {
+    const o = act(); if (!isImage(o)) return alert("請先點選一張圖片");
+    const btn = $("pRemoveBg"), st = $("bgStatus"); btn.disabled = true;
+    try {
+      st.textContent = "載入去背模型中…";
+      const { T, model, processor } = await loadBgModel();
+      st.textContent = "去背處理中…"; await sleep(30);
+      const el = o._originalElement || o.getElement(), w = el.naturalWidth || el.width, h = el.naturalHeight || el.height;
+      const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+      const ctx = cv.getContext("2d"); ctx.drawImage(el, 0, 0, w, h);
+      const image = await T.RawImage.fromCanvas(cv), { pixel_values } = await processor(image.rgb()), { output } = await model({ input: pixel_values });
+      const mask = await T.RawImage.fromTensor(output[0].mul(255).to("uint8")).resize(w, h), d = ctx.getImageData(0, 0, w, h);
+      for (let i = 0; i < w * h; i++) d.data[i * 4 + 3] = Math.min(d.data[i * 4 + 3], mask.data[i]);
+      ctx.putImageData(d, 0, 0);
+      o.setSrc(cv.toDataURL("image/png"), () => {
+        if (o.filters?.length) o.applyFilters();
+        o.setCoords(); canvas.requestRenderAll(); queueSave();
+        st.textContent = "去背完成"; btn.disabled = false;
+      });
+    } catch (e) { st.textContent = "去背失敗：" + e.message; btn.disabled = false; }
+  }
+
+  function saveProject() {
+    const blob = new Blob([JSON.stringify(snapshot())], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `project-${Date.now()}.json`; a.click();
+  }
+
+  function shrink(url, max = 2000) {
+    return new Promise(res => {
+      const im = new Image();
+      im.onload = () => {
+        const s = Math.min(1, max / Math.max(im.width, im.height)); if (s >= 1) return res(url);
+        const c = document.createElement("canvas"); c.width = Math.round(im.width * s); c.height = Math.round(im.height * s);
+        c.getContext("2d").drawImage(im, 0, 0, c.width, c.height);
+        res(c.toDataURL(url.startsWith("data:image/png") ? "image/png" : "image/jpeg", 0.9));
+      };
+      im.onerror = () => res(url); im.src = url;
+    });
+  }
+
+  function renderJSON(json, mult = 1, { format = "png", quality = 0.95, w = W, h = H } = {}) {
+    return new Promise(res => {
+      const sc = new fabric.StaticCanvas(null, { width: w, height: h, enableRetinaScaling: false });
+      const j = { ...json };
+      if (format === "jpeg" && !j.background) j.background = "#ffffff";
+      sc.loadFromJSON(j, () => {
+        sc.renderAll(); let url = "";
+        try { url = sc.toDataURL({ format, quality, multiplier: mult }); } catch {}
+        sc.dispose(); res(url);
+      });
+    });
+  }
+  async function preloadFonts(json) {
+    const list = [];
+    const walk = o => { if (o.objects) o.objects.forEach(walk); else if (o.fontFamily) list.push([`${o.fontStyle || "normal"} ${o.fontWeight || 400} 40px "${o.fontFamily}"`, o.text || "字A"]); };
+    (json?.objects || []).forEach(walk);
+    await Promise.all(list.map(([f, t]) => document.fonts.load(f, t).catch(() => {})));
+    fabric.util.clearFabricFontCache();
+  }
+
+  async function exportDesign() {
+    const fmt = $("edFormat").value, btn = $("edExport"), old = btn.textContent;
+    snapshot(); btn.disabled = true; btn.textContent = "處理中…";
+    try {
+      await Promise.all(pages.map(preloadFonts));
+      const name = `design-${W}x${H}`;
+      if (fmt === "pdf") {
+        await loadScript("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js");
+        const orient = W >= H ? "l" : "p", pdf = new window.jspdf.jsPDF({ orientation: orient, unit: "px", format: [W, H], hotfixes: ["px_scaling"], compress: true });
+        for (let i = 0; i < pages.length; i++) {
+          if (i) pdf.addPage([W, H], orient);
+          pdf.addImage(await renderJSON(pages[i], 2, { format: "jpeg", quality: 0.92 }), "JPEG", 0, 0, W, H);
+        }
+        pdf.save(name + ".pdf");
+      } else {
+        const jpg = fmt === "jpeg", url = await renderJSON(pages[cur], 2, { format: jpg ? "jpeg" : "png" });
+        const blobUrl = URL.createObjectURL(await (await fetch(url)).blob());
+        const a = document.createElement("a"); a.href = blobUrl; a.download = `${name}.${jpg ? "jpg" : "png"}`; a.click();
+      }
+    } catch (e) { alert("匯出失敗：" + (e.message || e)); }
+    finally { btn.disabled = false; btn.textContent = old; }
+  }
+
+  let guides = [];
+  function snap(o) {
+    guides = [];
+    const th = 7 / zoom, r = o.getBoundingRect(true, true), xs = [0, W / 2, W], ys = [0, H / 2, H];
+    canvas.getObjects().forEach(x => {
+      if (x === o || x.visible === false || x.isOnion || (o.type === "activeSelection" && o.contains(x))) return;
+      const b = x.getBoundingRect(true, true);
+      xs.push(b.left, b.left + b.width / 2, b.left + b.width); ys.push(b.top, b.top + b.height / 2, b.top + b.height);
+    });
+    const best = (cands, vals) => { let m = null; for (const v of vals) for (const c of cands) { const d = c - v; if (Math.abs(d) < th && (!m || Math.abs(d) < Math.abs(m.d))) m = { d, c }; } return m; };
+    const mx = best(xs, [r.left, r.left + r.width / 2, r.left + r.width]), my = best(ys, [r.top, r.top + r.height / 2, r.top + r.height]);
+    if (mx) { o.left += mx.d; guides.push({ x: mx.c }); }
+    if (my) { o.top += my.d; guides.push({ y: my.c }); }
+    if (mx || my) o.setCoords();
+  }
+  function drawGuides() {
+    if (!guides.length) return;
+    const ctx = canvas.getContext();
+    ctx.save(); ctx.transform(...canvas.viewportTransform);
+    ctx.strokeStyle = "#00a8fc"; ctx.lineWidth = 1.5 / zoom; ctx.setLineDash([6 / zoom, 4 / zoom]);
+    ctx.beginPath();
+    guides.forEach(g => { if (g.x !== undefined) { ctx.moveTo(g.x, 0); ctx.lineTo(g.x, H); } else { ctx.moveTo(0, g.y); ctx.lineTo(W, g.y); } });
+    ctx.stroke(); ctx.restore();
+  }
+
+  let layerTimer = null, dragObj = null;
+  function refreshLayers() { clearTimeout(layerTimer); layerTimer = setTimeout(renderLayers, 60); }
+  function layerName(o) {
+    if (o.name) return o.name;
+    if (isText(o)) return "文字：" + (o.text || "").replace(/\s+/g, " ").slice(0, 14);
+    return { image: "圖片", group: "群組", rect: "矩形", circle: "圓形", line: "直線" }[o.type] || o.type;
+  }
+  function renderLayers() {
+    if (!canvas) return;
+    const box = $("layerList"); box.innerHTML = "";
+    const objs = canvas.getObjects().slice().reverse(), sel = canvas.getActiveObjects();
+    objs.forEach(o => {
+      const row = document.createElement("div");
+      row.className = "layer" + (sel.includes(o) ? " on" : "") + (o.visible === false ? " hid" : "");
+      row.draggable = true;
+      row.innerHTML = `<span class="lname"></span><button class="up-b" title="上移">▲</button><button class="dn-b" title="下移">▼</button><button class="lv" title="顯示/隱藏">${o.visible === false ? "🚫" : "👁"}</button><button class="ll" title="鎖定/解鎖">${o.lockMovementX || o.selectable === false ? "🔒" : "🔓"}</button>`;
+      row.querySelector(".lname").textContent = layerName(o);
+      row.onclick = e => { if (e.target.tagName === "BUTTON" || o.visible === false || o.selectable === false) return; canvas.setActiveObject(o); canvas.requestRenderAll(); };
+      row.querySelector(".up-b").onclick = () => { canvas.bringForward(o); canvas.requestRenderAll(); queueSave(); renderLayers(); };
+      row.querySelector(".dn-b").onclick = () => { canvas.sendBackwards(o); canvas.requestRenderAll(); queueSave(); renderLayers(); };
+      row.querySelector(".lv").onclick = () => { o.visible = o.visible === false; if (!o.visible) canvas.discardActiveObject(); canvas.requestRenderAll(); queueSave(); renderLayers(); };
+      row.querySelector(".ll").onclick = () => {
+        const lock = !(o.lockMovementX || o.selectable === false);
+        o.set({ lockMovementX: lock, lockMovementY: lock, lockScalingX: lock, lockScalingY: lock, lockRotation: lock, hasControls: !lock, selectable: !lock, evented: !lock });
+        canvas.requestRenderAll(); refreshProps(); queueSave(); renderLayers();
+      };
+      row.ondragstart = () => { dragObj = o; };
+      row.ondragover = e => e.preventDefault();
+      row.ondrop = e => { e.preventDefault(); if (!dragObj || dragObj === o) return; canvas.moveTo(dragObj, canvas.getObjects().indexOf(o)); dragObj = null; canvas.requestRenderAll(); queueSave(); renderLayers(); };
+      box.appendChild(row);
+    });
+    $("layerEmpty").classList.toggle("hidden", objs.length > 0);
+  }
+
+  let clip = null;
+  function addClone(c) {
+    canvas.discardActiveObject();
+    c.set({ left: c.left + 30, top: c.top + 30, evented: true });
+    if (c.type === "activeSelection") { c.canvas = canvas; c.forEachObject(x => canvas.add(x)); c.setCoords(); } else canvas.add(c);
+    canvas.setActiveObject(c); canvas.requestRenderAll();
+  }
+  function duplicate() { const o = act(); if (o) o.clone(addClone, EXTRA); }
+  function copy() { const o = act(); if (o) o.clone(c => { clip = c; }, EXTRA); }
+  function paste() { if (!clip) return; clip.clone(c => { addClone(c); clip.set({ left: clip.left + 30, top: clip.top + 30 }); }, EXTRA); }
+
+  const tb = (text, x, y, w, size, o = {}) => ({ type: "textbox", text, left: x, top: y, width: w, fontSize: size, fontFamily: "Noto Sans TC", fontWeight: "700", fill: "#222222", textAlign: "center", originX: "center", originY: "center", lineHeight: 1.2, splitByGrapheme: true, styles: [], ...o });
+  const tl = (text, x, y, w, size, o = {}) => tb(text, x, y, w, size, { originX: "left", textAlign: "left", ...o });
+  const rc = (x, y, w, h, fill, o = {}) => ({ type: "rect", left: x, top: y, width: w, height: h, fill, strokeWidth: 0, ...o });
+  const ci = (x, y, r, fill, o = {}) => ({ type: "circle", left: x, top: y, radius: r, fill, originX: "center", originY: "center", strokeWidth: 0, ...o });
+  const tpl = (name, w, h, background, objects) => ({ name, W: w, H: h, json: { version: "5.3.0", background, objects } });
+  const TEMPLATES = [
+    tpl("事件卡 (直式)", 744, 1039, "#e8dfc8", [
+      rc(28, 28, 688, 983, "transparent", { stroke: "#1e2d24", strokeWidth: 6, rx: 12, ry: 12 }),
+      rc(60, 48, 220, 56, "#1e2d24", { rx: 8, ry: 8 }),
+      tb("事件卡", 170, 76, 200, 32, { fontWeight: "900", fill: "#f4ecd8" }),
+      tb("STORY 37", 590, 76, 180, 28, { fontFamily: "Montserrat", fontWeight: "800", fill: "#1e2d24" }),
+      rc(60, 560, 624, 96, "#dfd3b5", { stroke: "#1e2d24", strokeWidth: 3, rx: 14, ry: 14 }),
+      tb("保羅在雅典講道", 372, 608, 580, 56, { fontFamily: "Noto Serif TC", fontWeight: "900", fill: "#1e2d24" }),
+      tl("👤 人物\n保羅×1", 90, 745, 240, 32, { fontWeight: "900", fill: "#1e2d24" }),
+      tl("🏛️ 元素\n道路×1、信心×1", 400, 745, 280, 32, { fontWeight: "900", fill: "#1e2d24" }),
+      rc(120, 880, 360, 54, "#1e2d24", { rx: 12, ry: 12 }),
+      tb("📖 使徒行傳 17:16-34", 300, 907, 340, 24, { fill: "#f4ecd8" }),
+      ci(585, 905, 58, "#f4ecd8", { stroke: "#1e2d24", strokeWidth: 4 }),
+      tb("2分", 585, 905, 100, 42, { fontWeight: "900", fill: "#1e2d24" })
+    ]),
+    tpl("事件卡 (橫式)", 1039, 744, "#e8dfc8", [
+      rc(24, 24, 991, 696, "transparent", { stroke: "#1e2d24", strokeWidth: 6, rx: 10, ry: 10 }),
+      rc(55, 42, 220, 52, "#1e2d24", { rx: 6, ry: 6 }),
+      tb("事件卡", 165, 68, 200, 30, { fontWeight: "900", fill: "#f4ecd8" }),
+      tb("STORY 37", 880, 68, 180, 26, { fontFamily: "Montserrat", fontWeight: "800", fill: "#1e2d24" }),
+      tl("保羅在雅典講道", 55, 165, 620, 78, { fontFamily: "Noto Serif TC", fontWeight: "900", fill: "#1e2d24" }),
+      rc(730, 140, 255, 540, "transparent", { stroke: "#1e2d24", strokeWidth: 3, rx: 12, ry: 12 }),
+      tl("👤 人物\n保羅×1", 755, 230, 210, 28, { fontWeight: "900", fill: "#1e2d24" }),
+      tl("🏛️ 元素\n道路×1、\n信心×1", 755, 380, 210, 28, { fontWeight: "900", fill: "#1e2d24" }),
+      rc(745, 500, 225, 44, "#1e2d24", { rx: 10, ry: 10 }),
+      tb("📖 使徒行傳 17:16-34", 857, 522, 215, 20, { fill: "#f4ecd8" }),
+      ci(857, 615, 52, "#f4ecd8", { stroke: "#1e2d24", strokeWidth: 4 }),
+      tb("2分", 857, 615, 90, 38, { fontWeight: "900", fill: "#1e2d24" })
+    ])
+  ];
+  async function renderTemplates() {
+    const box = $("tplGrid"); box.innerHTML = "";
+    for (const t of TEMPLATES) {
+      const d = document.createElement("div"); d.className = "tpl";
+      const im = document.createElement("img"), cap = document.createElement("div");
+      cap.textContent = `${t.name}`;
+      d.append(im, cap); d.onclick = () => { setSize(t.W, t.H, false); loadPageJSON(JSON.parse(JSON.stringify(t.json)), pushHistory); };
+      box.appendChild(d);
+      im.src = await renderJSON(t.json, 220 / Math.max(t.W, t.H), { format: "jpeg", quality: 0.8, w: t.W, h: t.H });
+    }
+  }
+
+  /* =====================================================================
+     手機版抽屜導覽 + 單指平移畫布 + Firebase Realtime Database 雲端讀寫
+     ===================================================================== */
+  function bindMobileAndCloud() {
+    const leftSide = $("leftSideDrawer"), rightSide = $("props");
+    const closeDrawers = () => {
+      leftSide.classList.remove("mobile-open");
+      rightSide.classList.remove("mobile-open");
+      document.querySelectorAll("#mobileNav button").forEach(b => b.classList.toggle("on", b.dataset.mnav === "close"));
+    };
+    $("closeLeftDrawerBtn").onclick = closeDrawers;
+    $("closeRightDrawerBtn").onclick = closeDrawers;
+
+    document.querySelectorAll("#mobileNav button").forEach(b => {
+      b.onclick = () => {
+        const target = b.dataset.mnav;
+        document.querySelectorAll("#mobileNav button").forEach(x => x.classList.toggle("on", x === b));
+        if (target === "close") {
+          closeDrawers();
+        } else if (target === "props") {
+          leftSide.classList.remove("mobile-open");
+          rightSide.classList.add("mobile-open");
+        } else {
+          rightSide.classList.remove("mobile-open");
+          leftSide.classList.add("mobile-open");
+          const titles = { pro: "文字擷取與清單", card: "版面元件與範本", img: "圖片上傳與去背", layers: "圖層與 A4 列印" };
+          $("leftDrawerTitle").textContent = titles[target] || "工具面板";
+          document.querySelectorAll(".stabs button").forEach(x => x.classList.toggle("on", x.dataset.panel === target));
+          document.querySelectorAll(".spanel").forEach(p => p.classList.toggle("hidden", p.dataset.panel !== target));
+          if (target === "layers") renderLayers();
+        }
+      };
+    });
+
+    /* 手機單指平移畫布切換 */
+    const panBtn = $("mobilePanToggleBtn");
+    panBtn.onclick = () => {
+      touchPanMode = !touchPanMode;
+      panBtn.classList.toggle("act-btn", touchPanMode);
+      panBtn.textContent = touchPanMode ? "🖐️ 平移中" : "🖐️ 移畫布";
+      canvas.selection = !touchPanMode;
+      canvas.forEachObject(o => {
+        if (touchPanMode) { o._savedSel = o.selectable; o._savedEv = o.evented; o.selectable = false; o.evented = false; }
+        else { if (o._savedSel !== undefined) o.selectable = o._savedSel; if (o._savedEv !== undefined) o.evented = o._savedEv; }
+      });
+      canvas.discardActiveObject(); canvas.requestRenderAll();
+    };
+
+    const st = $("stage");
+    let tStart = null;
+    st.addEventListener("touchstart", e => {
+      if (!touchPanMode || e.touches.length !== 1) return;
+      tStart = { x: e.touches[0].clientX + st.scrollLeft, y: e.touches[0].clientY + st.scrollTop };
+    }, { passive: true });
+    st.addEventListener("touchmove", e => {
+      if (!touchPanMode || !tStart || e.touches.length !== 1) return;
+      e.preventDefault();
+      st.scrollLeft = tStart.x - e.touches[0].clientX;
+      st.scrollTop = tStart.y - e.touches[0].clientY;
+    }, { passive: false });
+    st.addEventListener("touchend", () => { tStart = null; });
+
+    /* Firebase 雲端同步模組 */
+    const getFbBaseUrl = () => (localStorage.getItem(FB_URL_KEY) || $("fbUrlInput").value || "https://money-d8327-default-rtdb.firebaseio.com").replace(/\/+$/, "");
+    const savedFb = localStorage.getItem(FB_URL_KEY);
+    if (savedFb) $("fbUrlInput").value = savedFb;
+
+    $("cloudCfgBtn").onclick = () => { $("cloudModal").style.display = "flex"; };
+    $("fbModalClose").onclick = () => { $("cloudModal").style.display = "none"; };
+    $("fbModalSave").onclick = () => {
+      localStorage.setItem(FB_URL_KEY, $("fbUrlInput").value.trim());
+      $("cloudModal").style.display = "none";
+      alert("已儲存 Firebase 資料庫網址");
+    };
+
+    $("cloudSaveBtn").onclick = async () => {
+      const pid = ($("cloudProjId").value || "").trim().replace(/[.#$[\]/]/g, "_");
+      if (!pid) return alert("請輸入專案代號");
+      const btn = $("cloudSaveBtn"); btn.disabled = true; btn.textContent = "上傳中…";
+      try {
+        init();
+        const payload = {
+          updatedAt: Date.now(),
+          project: snapshot(),
+          favSeeds: loadFavSeeds()
+        };
+        const res = await fetch(`${getFbBaseUrl()}/ai_card_studio/${encodeURIComponent(pid)}.json`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        alert(`已儲存至雲端（代號：${pid}）。在手機或另一台電腦輸入相同代號點擊「📥 讀雲端」即可接續編輯。`);
+      } catch (e) {
+        alert("雲端儲存失敗，請點 ⚙️ 檢查 Firebase 網址與權限設定：" + e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = "☁️ 存雲端";
+      }
+    };
+
+    $("cloudLoadBtn").onclick = async () => {
+      const pid = ($("cloudProjId").value || "").trim().replace(/[.#$[\]/]/g, "_");
+      if (!pid) return alert("請輸入專案代號");
+      const btn = $("cloudLoadBtn"); btn.disabled = true; btn.textContent = "讀取中…";
+      try {
+        const res = await fetch(`${getFbBaseUrl()}/ai_card_studio/${encodeURIComponent(pid)}.json`);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        if (!data || !data.project) return alert(`找不到代號「${pid}」的雲端資料`);
+        if (Array.isArray(data.favSeeds)) saveFavSeeds(data.favSeeds);
+        showTab("editor");
+        loadProject(data.project, true);
+        alert(`已載入雲端專案「${pid}」`);
+      } catch (e) {
+        alert("雲端讀取失敗：" + e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = "📥 讀雲端";
+      }
+    };
+  }
+
+  /* ---- 綁定所有按鈕與快捷鍵 ---- */
+  function bindUI() {
+    document.querySelectorAll(".stabs button").forEach(b => b.onclick = () => {
+      document.querySelectorAll(".stabs button").forEach(x => x.classList.toggle("on", x === b));
+      document.querySelectorAll(".spanel").forEach(p => p.classList.toggle("hidden", p.dataset.panel !== b.dataset.panel));
+      if (b.dataset.panel === "layers") renderLayers();
+    });
+
+    $("proCloneImgBtn").onclick = () => $("proCloneFile").click();
+    $("proCloneFile").onchange = async e => {
+      const f = e.target.files[0]; if (!f) return; e.target.value = "";
+      setProStatus("正在分析圖片文字座標與背景…");
+      const res = await OCRLayoutEngine.analyze(f, p => setProStatus(`掃描進度 ${(p * 100).toFixed(0)}%…`));
+      await cloneImageLayoutToCanvas(res);
+    };
+    $("proGrabSelectedBtn").onclick = grabTextFromSelectedImage;
+    $("pGrabTextBtn").onclick = grabTextFromSelectedImage;
+
+    $("onionSkinSlider").oninput = e => updateOnionOpacity(e.target.value);
+    $("onionUploadBtn").onclick = () => $("onionFile").click();
+    $("onionFile").onchange = async e => {
+      const f = e.target.files[0]; if (!f) return; e.target.value = "";
+      setOnionSkinImage(await blobToDataURL(f), 0.45);
+    };
+
+    $("edEyedropBtn").onclick = () => {
+      eyedropperMode = !eyedropperMode;
+      $("edEyedropBtn").classList.toggle("on", eyedropperMode);
+      $("stage").classList.toggle("eyedrop", eyedropperMode);
+      if (eyedropperMode) setProStatus("請在畫布任意位置點擊吸取顏色");
+    };
+
+    $("pFeatherImgBtn").onclick = featherSelectedImage;
+    document.querySelectorAll("[data-smarttag]").forEach(b => b.onclick = () => addSmartBoundTag(b.dataset.smarttag));
+    document.querySelectorAll("[data-ornate]").forEach(b => b.onclick = () => addOrnateFrameOrBanner(b.dataset.ornate));
+    document.querySelectorAll("[data-tex]").forEach(b => b.onclick = () => toggleParchmentTexture());
+    $("exportA4SheetBtn").onclick = exportA4PrintSheetPDF;
+
+    $("proBoxGrabBtn").onclick = () => {
+      boxGrabMode = !boxGrabMode;
+      $("proBoxGrabBtn").textContent = boxGrabMode ? "拖曳框選區域（點此取消）" : "框選區域轉文字";
+      canvas.selection = !boxGrabMode;
+      canvas.forEachObject(o => { o._prevEv = o.evented; if (boxGrabMode) o.evented = false; });
+      if (boxGrabMode && window.innerWidth <= 860) $("leftSideDrawer").classList.remove("mobile-open");
+    };
+
+    canvas.on("mouse:down", opt => {
+      if (eyedropperMode) {
+        try {
+          const retina = canvas.getRetinaScaling ? canvas.getRetinaScaling() : 1;
+          const px = Math.round((opt.e.offsetX || 0) * retina);
+          const py = Math.round((opt.e.offsetY || 0) * retina);
+          const p = canvas.lowerCanvasEl.getContext("2d").getImageData(px, py, 1, 1).data;
+          const hex = "#" + [p[0], p[1], p[2]].map(x => x.toString(16).padStart(2, "0")).join("");
+          const o = act();
+          if (o && (isText(o) || isShape(o))) {
+            o.set("fill", hex);
+            canvas.requestRenderAll(); queueSave(); refreshProps();
+          }
+          navigator.clipboard?.writeText(hex).catch(() => {});
+          setProStatus(`已吸取顏色 ${hex}`);
+        } catch {}
+        eyedropperMode = false;
+        $("edEyedropBtn").classList.remove("on");
+        $("stage").classList.remove("eyedrop");
+        return;
+      }
+      if (!boxGrabMode) return;
+      startPt = canvas.getPointer(opt.e);
+      grabRect = new fabric.Rect({ left: startPt.x, top: startPt.y, width: 1, height: 1, fill: "rgba(0,168,252,0.18)", stroke: "#00a8fc", strokeWidth: 3, strokeDashArray: [6, 4], selectable: false, evented: false });
+      canvas.add(grabRect);
+    });
+    canvas.on("mouse:move", opt => {
+      if (!boxGrabMode || !grabRect || !startPt) return;
+      const pt = canvas.getPointer(opt.e);
+      grabRect.set({ left: Math.min(startPt.x, pt.x), top: Math.min(startPt.y, pt.y), width: Math.abs(pt.x - startPt.x), height: Math.abs(pt.y - startPt.y) });
+      canvas.requestRenderAll();
+    });
+    canvas.on("mouse:up", async () => {
+      if (!boxGrabMode || !grabRect) return;
+      const box = { left: grabRect.left, top: grabRect.top, width: grabRect.width, height: grabRect.height };
+      canvas.remove(grabRect); grabRect = null; startPt = null; boxGrabMode = false;
+      $("proBoxGrabBtn").textContent = "框選區域轉文字";
+      canvas.selection = true;
+      canvas.forEachObject(o => { if (o._prevEv !== undefined) o.evented = o._prevEv; });
+      if (box.width < 12 || box.height < 12) return;
+      const bgImg = canvas.getObjects().find(o => isImage(o) && !o.isOnion);
+      if (!bgImg) return alert("找不到底圖");
+      setProStatus("正在辨識框選區域文字…");
+      const el = bgImg._originalElement || bgImg.getElement(), imgW = el.naturalWidth || el.width, imgH = el.naturalHeight || el.height;
+      const bound = bgImg.getBoundingRect(true, true), sx = imgW / bound.width, sy = imgH / bound.height;
+      const cropX = Math.max(0, (box.left - bound.left) * sx), cropY = Math.max(0, (box.top - bound.top) * sy);
+      const cropW = Math.min(imgW - cropX, box.width * sx), cropH = Math.min(imgH - cropY, box.height * sy);
+      const subCv = document.createElement("canvas"), subScale = Math.min(2, Math.max(0.4, 90 / cropH));
+      subCv.width = Math.max(20, Math.round(cropW * subScale)); subCv.height = Math.max(20, Math.round(cropH * subScale));
+      subCv.getContext("2d").drawImage(el, cropX, cropY, cropW, cropH, 0, 0, subCv.width, subCv.height);
+      const fullCv = document.createElement("canvas"); fullCv.width = imgW; fullCv.height = imgH;
+      const fullCtx = fullCv.getContext("2d"); fullCtx.drawImage(el, 0, 0);
+      const colorInfo = OCRLayoutEngine.sampleAccurateColors(fullCtx, imgW, imgH, { x0: cropX, y0: cropY, x1: cropX + cropW, y1: cropY + cropH });
+      if (colorInfo.isDarkBg) {
+        const sctx = subCv.getContext("2d"), sd = sctx.getImageData(0, 0, subCv.width, subCv.height);
+        for (let i = 0; i < sd.data.length; i += 4) { sd.data[i] = 255 - sd.data[i]; sd.data[i + 1] = 255 - sd.data[i + 1]; sd.data[i + 2] = 255 - sd.data[i + 2]; }
+        sctx.putImageData(sd, 0, 0);
+      }
+      let txt = "";
+      try { const w = await OCRLayoutEngine.getWorker(); txt = ((await w.recognize(subCv))?.data?.text || "").replace(/\s+/g, " ").trim(); } catch {}
+      if (!txt) txt = prompt("請輸入此處文字：", "文字") || "文字";
+      const newBgUrl = OCRLayoutEngine.eraseTextWithGrain(fullCv, [{ x: cropX, y: cropY, width: cropW, height: cropH, bgRGB: colorInfo.bgRGB, isDarkBg: colorInfo.isDarkBg, bgLum: colorInfo.bgLum }]);
+      bgImg.setSrc(newBgUrl, () => {
+        bgImg.set({ name: "去字底圖（已鎖定）", selectable: false, evented: false });
+        const fs = Math.max(14, Math.round(box.height * 0.78));
+        const tbObj = new fabric.Textbox(txt, { left: box.left + box.width / 2, top: box.top + box.height / 2, width: Math.max(box.width * 1.15, fs * txt.length * 1.05), fontSize: fs, fontFamily: "Noto Sans TC", fontWeight: "900", fill: colorInfo.fgColor, textAlign: "center", originX: "center", originY: "center", splitByGrapheme: true });
+        canvas.add(tbObj); canvas.setActiveObject(tbObj); canvas.requestRenderAll(); queueSave(); refreshQuickTextList();
+        setProStatus(`已建立文字層「${txt}」`);
+      });
+    });
+
+    $("proMagicGrab").onclick = magicGrabSubject;
+    $("proMagicEraser").onclick = openMagicEraser;
+    $("eraserCancel").onclick = () => { $("eraserModal").style.display = "none"; };
+    $("eraserApply").onclick = applyMagicEraser;
+    $("proRemoveBgQuick").onclick = removeBg;
+    $("pRemoveBg").onclick = removeBg;
+
+    document.querySelectorAll("[data-text]").forEach(b => b.onclick = () => addText(b.dataset.text));
+    document.querySelectorAll("[data-shape]").forEach(b => b.onclick = () => addShape(b.dataset.shape));
+    document.querySelectorAll("[data-align]").forEach(b => b.onclick = () => alignTo(b.dataset.align));
+    document.querySelectorAll("[data-fx]").forEach(b => b.onclick = () => textEffect(b.dataset.fx));
+
+    $("edUpload").onclick = () => $("edFile").click();
+    $("edFile").onchange = e => { addFiles([...e.target.files]); e.target.value = ""; };
+    $("edPreset").onchange = e => { if (e.target.value === "custom") { $("edW").focus(); return; } const [w, h] = e.target.value.split("x"); setSize(w, h, $("magicResizeChk").checked); queueSave(); };
+    $("edW").onchange = $("edH").onchange = () => { setSize($("edW").value, $("edH").value, $("magicResizeChk").checked); queueSave(); };
+    $("edUndo").onclick = undo; $("edRedo").onclick = redo;
+    $("edZoomIn").onclick = () => { zoom = Math.min(zoom * 1.2, 4); applyZoom(); };
+    $("edZoomOut").onclick = () => { zoom = Math.max(zoom / 1.2, 0.05); applyZoom(); };
+    $("edFit").onclick = fit;
+    $("edNew").onclick = () => { if (!confirm("確定清空目前所有頁面？")) return; pages = [blankPage()]; cur = 0; thumbs = []; loadPageJSON(pages[0], pushHistory); };
+    $("edSave").onclick = saveProject;
+    $("edOpen").onclick = () => $("edOpenFile").click();
+    $("edOpenFile").onchange = async e => { const f = e.target.files[0]; if (f) { try { loadProject(await f.text()); } catch { alert("檔案格式錯誤"); } } e.target.value = ""; };
+    $("edExport").onclick = exportDesign;
+    $("pBg").oninput = e => { canvas.backgroundColor = e.target.value; canvas.requestRenderAll(); queueSave(); };
+
+    $("pFont").onchange = e => setFont(e.target.value);
+    $("pFontSize").oninput = e => setTextProp({ fontSize: +e.target.value || 12 });
+    $("pTextColor").oninput = e => setTextProp({ fill: e.target.value });
+    $("pBold").onclick = () => { const o = act(); setTextProp({ fontWeight: (o.fontWeight === "bold" || +o.fontWeight >= 700) ? "400" : "bold" }); ensureFont(o); refreshProps(); };
+    $("pItalic").onclick = () => { setTextProp({ fontStyle: act().fontStyle === "italic" ? "normal" : "italic" }); refreshProps(); };
+    $("pAlign").onclick = () => { const i = ALIGNS.findIndex(a => a[0] === act().textAlign); setTextProp({ textAlign: ALIGNS[(i + 1) % ALIGNS.length][0] }); refreshProps(); };
+    $("pLine").oninput = e => setTextProp({ lineHeight: +e.target.value });
+    $("pSpacing").oninput = e => setTextProp({ charSpacing: +e.target.value });
+    const strokeText = () => { const w = +$("pTextStrokeW").value; setTextProp({ stroke: w ? $("pTextStroke").value : null, strokeWidth: w, paintFirst: "stroke" }); };
+    $("pTextStroke").oninput = strokeText; $("pTextStrokeW").oninput = strokeText;
+    $("pTextBg").oninput = e => setTextProp({ backgroundColor: e.target.value });
+    $("pTextBgClear").onclick = () => setTextProp({ backgroundColor: "" });
+
+    $("pFill").oninput = e => setProp({ fill: e.target.value });
+    $("pFillClear").onclick = () => setProp({ fill: "transparent" });
+    const strokeShape = () => setProp({ stroke: $("pStroke").value, strokeWidth: +$("pStrokeW").value });
+    $("pStroke").oninput = strokeShape; $("pStrokeW").oninput = strokeShape;
+    $("pRadius").oninput = e => setProp({ rx: +e.target.value, ry: +e.target.value });
+
+    $("pCover").onclick = coverCanvas;
+    ["pBright", "pContrast", "pSat"].forEach(id => $(id).oninput = applyImageFilters);
+    $("pImgRadius").oninput = e => setImageRadius(+e.target.value);
+
+    $("pOpacity").oninput = e => setProp({ opacity: +e.target.value });
+    $("pFront").onclick = () => { act() && canvas.bringToFront(act()); queueSave(); };
+    $("pBack").onclick = () => { act() && canvas.sendToBack(act()); queueSave(); };
+    $("pFwd").onclick = () => { act() && canvas.bringForward(act()); queueSave(); };
+    $("pBwd").onclick = () => { act() && canvas.sendBackwards(act()); queueSave(); };
+    $("pDup").onclick = duplicate; $("pLock").onclick = toggleLock; $("pDel").onclick = removeActive;
+    $("pGroup").onclick = () => { const o = act(); if (o?.type === "activeSelection") { o.toGroup(); canvas.requestRenderAll(); queueSave(); refreshProps(); refreshLayers(); } };
+    $("pUngroup").onclick = () => { const o = act(); if (o?.type === "group") { o.toActiveSelection(); canvas.requestRenderAll(); queueSave(); refreshProps(); refreshLayers(); } };
+
+    $("pgAdd").onclick = () => addPage(false); $("pgDup").onclick = () => addPage(true); $("pgDel").onclick = deletePage;
+    $("pgLeft").onclick = () => movePage(-1); $("pgRight").onclick = () => movePage(1);
+
+    const st = $("stage");
+    let spaceDown = false, isPanning = false, panStart = { x: 0, y: 0 };
+    window.addEventListener("keydown", e => { if (e.code === "Space" && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName) && !act()?.isEditing) { spaceDown = true; st.classList.add("panning"); } });
+    window.addEventListener("keyup", e => { if (e.code === "Space") { spaceDown = false; isPanning = false; st.classList.remove("panning"); } });
+    st.addEventListener("mousedown", e => {
+      $("ctxMenu").style.display = "none";
+      if (spaceDown) { isPanning = true; panStart = { x: e.clientX + st.scrollLeft, y: e.clientY + st.scrollTop }; e.preventDefault(); }
+      else if (e.target === st) { canvas.discardActiveObject(); canvas.requestRenderAll(); }
+    });
+    window.addEventListener("mousemove", e => { if (isPanning) { st.scrollLeft = panStart.x - e.clientX; st.scrollTop = panStart.y - e.clientY; } });
+    window.addEventListener("mouseup", () => { isPanning = false; });
+
+    st.addEventListener("contextmenu", e => {
+      e.preventDefault();
+      const menu = $("ctxMenu"); menu.style.display = "block";
+      menu.style.left = Math.min(window.innerWidth - 190, e.clientX) + "px";
+      menu.style.top = Math.min(window.innerHeight - 200, e.clientY) + "px";
+    });
+    document.querySelectorAll("[data-ctx]").forEach(b => b.onclick = () => {
+      $("ctxMenu").style.display = "none";
+      const cmd = b.dataset.ctx;
+      if (cmd === "grabtext") grabTextFromSelectedImage();
+      if (cmd === "dup") duplicate();
+      if (cmd === "front" && act()) { canvas.bringToFront(act()); queueSave(); }
+      if (cmd === "back" && act()) { canvas.sendToBack(act()); queueSave(); }
+      if (cmd === "lock") toggleLock();
+      if (cmd === "del") removeActive();
+    });
+
+    st.addEventListener("dragover", e => { e.preventDefault(); st.classList.add("over"); });
+    st.addEventListener("dragleave", () => st.classList.remove("over"));
+    st.addEventListener("drop", e => {
+      e.preventDefault(); st.classList.remove("over");
+      const files = [...e.dataTransfer.files].filter(f => f.type.startsWith("image/"));
+      if (files.length && isText(act())) syncImageToActiveText(files[0]); else addFiles(files);
+    });
+    st.addEventListener("wheel", e => { if (!e.ctrlKey) return; e.preventDefault(); zoom = Math.max(0.05, Math.min(4, zoom * (e.deltaY < 0 ? 1.1 : 0.9))); applyZoom(); }, { passive: false });
+
+    document.addEventListener("paste", e => {
+      if ($("tab-editor").classList.contains("hidden")) return;
+      const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+      if (files.length) { e.preventDefault(); if (isText(act())) syncImageToActiveText(files[0]); else addFiles(files); }
+      else if (clip) { e.preventDefault(); paste(); }
+    });
+
+    document.addEventListener("keydown", e => {
+      if ($("tab-editor").classList.contains("hidden")) return;
+      const tag = document.activeElement?.tagName;
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(tag) && document.activeElement.type !== "range") return;
+      const o = act(); if (o && o.isEditing) return;
+      const ctrl = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+      if (ctrl && k === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if (ctrl && (k === "y" || (k === "z" && e.shiftKey))) { e.preventDefault(); redo(); }
+      else if (ctrl && k === "d") { e.preventDefault(); duplicate(); }
+      else if (ctrl && k === "c" && o) copy();
+      else if (k === "escape") { canvas.discardActiveObject(); canvas.requestRenderAll(); }
+      else if ((k === "delete" || k === "backspace") && o) { e.preventDefault(); removeActive(); }
+      else if (o && k.startsWith("arrow")) {
+        e.preventDefault(); const step = e.shiftKey ? 10 : 1;
+        o.set({ left: o.left + (k === "arrowleft" ? -step : k === "arrowright" ? step : 0), top: o.top + (k === "arrowup" ? -step : k === "arrowdown" ? step : 0) });
+        o.setCoords(); canvas.requestRenderAll(); queueSave();
+      }
+    });
+  }
+
+  return { init, fit, addImage, refreshAiThumbs, cloneImageLayoutToCanvas };
+})();
+</script>
+</body>
+</html>
